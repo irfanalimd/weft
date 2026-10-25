@@ -1,0 +1,13 @@
+[package]
+name = "weft-core"
+description = "Weft CRDT engine: a run-length-encoded sequence CRDT for collaborative text."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+proptest.workspace = true
+rand.workspace = true
+criterion.workspace = true

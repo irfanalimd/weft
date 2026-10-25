@@ -1,0 +1,16 @@
+[package]
+name = "weft-sync"
+description = "Weft wire protocol and sans-IO sync state machines."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+weft-core.workspace = true
+serde.workspace = true
+postcard.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand.workspace = true
+proptest.workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "weft-wasm"
+description = "Browser bindings for Weft (wasm-bindgen)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+weft-core.workspace = true
+weft-sync.workspace = true
+wasm-bindgen.workspace = true
+js-sys.workspace = true
+base64.workspace = true
