@@ -1,4 +1,5 @@
-//! Weft sync server binary. Configuration via `WEFT_ADDR`, `WEFT_DATA_DIR`, `WEFT_STATIC_DIR`;
+//! Weft sync server binary. Configuration via `WEFT_ADDR`, `WEFT_DATA_DIR`, `WEFT_STATIC_DIR`,
+//! `WEFT_LIMIT_*` and `WEFT_ALLOWED_ORIGINS` (see `weft_server::Limits`);
 //! log filter via `RUST_LOG` (default `info`).
 
 use tracing_subscriber::EnvFilter;

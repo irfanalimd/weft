@@ -14,7 +14,7 @@ mod merge;
 mod seq;
 mod undo;
 
-pub use doc::Doc;
+pub use doc::{Doc, MAX_PENDING_BYTES, MAX_PENDING_UNITS};
 pub use undo::{UndoManager, UndoResult};
 
 use encoding::{Reader, VERSION, err, write_var};

@@ -115,6 +115,8 @@ impl Doc {
     pub fn encode_full(&self) -> Update;                       // == encode_diff(&Default)
     pub fn apply_update(&mut self, update: &Update) -> Result<Vec<Change>, DecodeError>;
     pub fn has_pending(&self) -> bool;                         // buffered ops awaiting deps
+    // The pending queue is capped at MAX_PENDING_UNITS (100k: 1 per run + 1 per char/delete
+    // target) or MAX_PENDING_BYTES (8 MiB est.); past that apply_update returns Err.
 
     // Cursors.
     pub fn anchor_at(&self, pos: usize) -> Anchor;             // anchor sticking to the left char
@@ -251,6 +253,25 @@ The TS session layer produces and consumes this; the server treats it as opaque 
   `WEFT_STATIC_DIR` (default `./web/dist`).
 - Ping/keepalive; per-connection outbound queue with backpressure; malformed frames close the
   connection, not the room.
+- **Abuse limits** (`weft_server::Limits`; env vars, all optional). Refusals send an `Error` frame,
+  then close with code 1008.
+
+  | Env var | Default | Effect |
+  |---|---|---|
+  | — (const `MAX_FRAME`) | 1 MiB | max WebSocket message/frame size from clients |
+  | `WEFT_LIMIT_CONNS` | 10000 | concurrent WebSockets server-wide (`OVERLOADED`) |
+  | `WEFT_LIMIT_CONNS_PER_IP` | 64 | concurrent WebSockets per client IP, IPv6 grouped per /64 (`RATE_LIMITED`) |
+  | `WEFT_LIMIT_MSG_RATE` / `WEFT_LIMIT_MSG_BURST` | 300/s, burst 600 | token bucket on incoming messages per connection (`RATE_LIMITED`) |
+  | `WEFT_LIMIT_HELLO_SECS` | 10 | close a connection with no valid `Hello` by then (`MALFORMED`) |
+  | `WEFT_LIMIT_DOC_BYTES` | 16777216 (16 MiB) | reject `Update`s once the doc's log would exceed this (compacts first to measure the real state) (`TOO_LARGE`) |
+  | `WEFT_LIMIT_ROOMS` | 2000 | docs loaded in memory; when full, rooms without connections are unloaded, else new docs are refused (`OVERLOADED`) |
+  | `WEFT_ALLOWED_ORIGINS` | empty | comma-separated extra allowed `Origin`s (full origin or bare host). A present `Origin` must match the `Host` header or this list, else HTTP 403; a missing `Origin` (native clients) is allowed |
+
+- **Client IP**: `X-Forwarded-For` (left-most entry) is used only when the TCP peer is loopback
+  (Caddy on the same box overwrites the header); otherwise the peer address. `run` serves with
+  `into_make_service_with_connect_info::<SocketAddr>()`, which `app()` requires for `/ws`.
+- **Presence binding**: a connection's `Awareness` frames must carry the `client_id` of its first
+  valid `Hello`; others (and any sent before `Hello`) are dropped silently.
 
 ---
 
@@ -334,3 +355,4 @@ lets UI work proceed before the real layer exists.
 | 2026-10-25 | weft-server (B) | Unknown `/api/*` → 404 (not the SPA); `export.md` → 404 for a doc that was never stored, 400 for a bad id; fatal errors send an `Error` frame then close with code 1008. `weft_server` is also a library (`Config`, `run`, `app`, `DocStore`) plus `examples/ws_client.rs` (a native CLI client for manual testing). | Testability, clear HTTP semantics |
 | 2026-10-25 | web UI (D) | Not a contract change, a coordination note: added npm dep `qrcode-generator` (lazy-loaded for the Share QR code). `vite.config.ts` now emits `/sw.js` from `web/src/pwa/sw.js` with the build's file list (app-shell precache incl. WASM); it skips `/api/*`, `/ws/*`, `/healthz`. The UI imports `randomUser` from `src/sync/index.ts`. | Offline app shell; share to phones |
 | 2026-10-25 | weft-wasm | Added `WeftClient.countNotIn(sv)` (empty `sv` = nothing confirmed) | Lead: the unsynced count survives reloads; the session persists the last confirmed SV in `localStorage["weft:confirmed:<doc>"]` |
+| 2026-10-25 | weft-core, weft-sync, weft-server (security Phase 0) | Additive. **core**: `pub const MAX_PENDING_UNITS = 100_000`, `MAX_PENDING_BYTES = 8 MiB`; `apply_update` returns `Err` when an update's out-of-order ops would overflow the pending queue (ops that don't fit are discarded; ops that could integrate stay integrated); pending dedup is now O(1). **sync**: `error_code::TOO_LARGE`=5, `RATE_LIMITED`=6, `OVERLOADED`=7. **server**: `Limits` (+ `Config.limits`, `AppState::with_limits`), env vars in §3, max frame 1 MiB, `Origin` check (403), real client IP via loopback-only `X-Forwarded-For`, per-IP/global connection caps, per-connection message token bucket, `Hello` deadline, doc size quota, room cap, awareness bound to the `Hello` client id; `DocLog::bytes()`/`records()`. **web**: peer names/colors sanitized (`safeName`, `safeColor` now `#rrggbb` only, `paletteColor`). | Public deployment: abuse/DoS protection without a protocol change |

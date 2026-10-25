@@ -4,7 +4,28 @@
 use crate::encoding::{self, Op};
 use crate::seq::{END, Key, LId, Loc, Piece, START, Seq};
 use crate::{Anchor, Change, ClientId, DecodeError, Id, StateVector, Update};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+/// Cap on buffered out-of-order ops: one unit per run plus one per inserted UTF-16 unit or
+/// delete target. Beyond it (or [`MAX_PENDING_BYTES`]), `apply_update` returns an error.
+pub const MAX_PENDING_UNITS: usize = 100_000;
+/// Cap on the estimated memory of buffered out-of-order ops.
+pub const MAX_PENDING_BYTES: usize = 8 << 20;
+
+/// Dedup key of a pending op: `(id, len, is_insert)`.
+type PendingKey = (Id, u64, bool);
+
+fn pending_key(op: &Op) -> PendingKey {
+    (op.id(), op.len(), matches!(op, Op::Insert { .. }))
+}
+
+/// `(units, estimated bytes)` an op occupies while pending.
+fn pending_cost(op: &Op) -> (usize, usize) {
+    match op {
+        Op::Insert { content, .. } => (1 + content.len(), 64 + 2 * content.len()),
+        Op::Delete { targets, .. } => (1 + targets.len(), 64 + 24 * targets.len()),
+    }
+}
 
 #[derive(Clone, Debug)]
 struct ClientData {
@@ -43,6 +64,9 @@ pub struct Doc {
     seq: Seq,
     log: Vec<LogEntry>,
     pending: Vec<Op>,
+    pending_keys: HashSet<PendingKey>,
+    pending_units: usize,
+    pending_bytes: usize,
 }
 
 fn push_change(changes: &mut Vec<Change>, c: Change) {
@@ -68,6 +92,9 @@ impl Doc {
             seq: Seq::new(),
             log: Vec::new(),
             pending: Vec::new(),
+            pending_keys: HashSet::new(),
+            pending_units: 0,
+            pending_bytes: 0,
         };
         d.intern(client);
         d
@@ -566,34 +593,74 @@ impl Doc {
     }
 
     /// Idempotent and commutative. Returns the changes to apply to a view.
+    ///
+    /// Ops whose dependencies are missing are buffered, up to [`MAX_PENDING_UNITS`] /
+    /// [`MAX_PENDING_BYTES`]. If this update would overflow that, the ops that don't fit are
+    /// discarded and an error is returned; ops that could integrate stay integrated (so a view
+    /// bound to this doc should resync from [`Doc::text`]).
     pub fn apply_update(&mut self, update: &Update) -> Result<Vec<Change>, DecodeError> {
         let ops = encoding::decode_ops(&update.0)?;
         let mut changes = Vec::new();
         let mut progressed = false;
+        let mut overflow = false;
         for op in ops {
             match self.try_integrate(op, &mut changes) {
                 Outcome::Integrated => progressed = true,
-                Outcome::Blocked(op) => self.push_pending(op),
+                Outcome::Blocked(op) => {
+                    if !self.push_pending(op) {
+                        overflow = true;
+                    }
+                }
                 Outcome::Dropped => {}
             }
         }
         while progressed && !self.pending.is_empty() {
             progressed = false;
             for op in std::mem::take(&mut self.pending) {
+                self.forget_pending(&op);
                 match self.try_integrate(op, &mut changes) {
                     Outcome::Integrated => progressed = true,
-                    Outcome::Blocked(op) => self.pending.push(op),
+                    // Only ever re-adds at most what was just removed, so it can't overflow.
+                    Outcome::Blocked(op) => {
+                        self.push_pending(op);
+                    }
                     Outcome::Dropped => {}
                 }
             }
         }
+        if overflow {
+            return Err(encoding::err(
+                "too many out-of-order ops buffered (pending queue full)",
+            ));
+        }
         Ok(changes)
     }
 
-    fn push_pending(&mut self, op: Op) {
-        if !self.pending.contains(&op) {
-            self.pending.push(op);
+    /// Buffers `op` unless it's a duplicate. Returns `false` if it didn't fit under the caps.
+    fn push_pending(&mut self, op: Op) -> bool {
+        let key = pending_key(&op);
+        if self.pending_keys.contains(&key) {
+            return true;
         }
+        let (units, bytes) = pending_cost(&op);
+        if self.pending_units + units > MAX_PENDING_UNITS
+            || self.pending_bytes + bytes > MAX_PENDING_BYTES
+        {
+            return false;
+        }
+        self.pending_keys.insert(key);
+        self.pending_units += units;
+        self.pending_bytes += bytes;
+        self.pending.push(op);
+        true
+    }
+
+    /// Removes `op`'s accounting (the caller has already taken it out of `pending`).
+    fn forget_pending(&mut self, op: &Op) {
+        self.pending_keys.remove(&pending_key(op));
+        let (units, bytes) = pending_cost(op);
+        self.pending_units -= units;
+        self.pending_bytes -= bytes;
     }
 
     pub fn has_pending(&self) -> bool {

@@ -25,7 +25,7 @@ moonshots. Each track has its own detailed file, with research, a phased plan, i
 - [ ] Commit the Playwright E2E scripts (`web/e2e/`) as an optional `npm run e2e`
 - [x] Handle SIGTERM for graceful shutdown (`weft-server` only handles Ctrl-C today, `crates/weft-server/src/lib.rs:286`), which is a prerequisite for Docker/Fly
 - [ ] Dockerfile and a deploy to a public URL, so people can try it
-- [ ] **Security Phase 0 before going public** (4–6 days, no protocol change, see track 2):
+- [x] **Security Phase 0 before going public** (4–6 days, no protocol change, see track 2):
   - cut the frame cap from 16 MiB to 1 MiB
   - add rate limits, connection caps and per-doc size quotas
   - add a first-message deadline and an Origin check
@@ -33,6 +33,9 @@ moonshots. Each track has its own detailed file, with research, a phased plan, i
   - limit the core's buffer for out-of-order ops
   - validate peer names and colours
   - add security headers
+
+- [ ] Pastes over 1 MiB are refused at the socket with no error frame, so the client retries forever. Chunk large updates or show a clear error.
+- [ ] Rate-limit `/api` routes per IP (only WebSockets are limited today)
 
 ## Decisions needed
 

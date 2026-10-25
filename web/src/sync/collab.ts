@@ -32,6 +32,7 @@ import {
 } from '@codemirror/view';
 import type { ChangeJs } from './wasm';
 import { diffText } from './diff';
+import { PALETTE } from './identity';
 
 /** Marks transactions that came from the CRDT (remote peers, other tabs, restores of state). */
 export const remoteEdit = Annotation.define<boolean>();
@@ -140,9 +141,33 @@ function collabPlugin(host: CollabHost) {
   );
 }
 
-const SAFE_COLOR = /^(#[0-9a-f]{3,8}|(rgb|rgba|hsl|hsla|oklch)\([0-9.,%\s/a-z-]+\))$/i;
-export const safeColor = (c: unknown): string =>
-  typeof c === 'string' && SAFE_COLOR.test(c.trim()) ? c.trim() : '#888888';
+// Peer names/colors arrive from untrusted awareness payloads. Colors end up in inline styles,
+// so only `#rrggbb` is accepted; names are only ever set via textContent / attributes.
+const SAFE_COLOR = /^#[0-9a-fA-F]{6}$/;
+const MAX_NAME = 40;
+
+/** A palette color picked deterministically from `key` (e.g. a client id). */
+export const paletteColor = (key: string): string => {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return PALETTE[h % PALETTE.length];
+};
+
+/** `c` if it is `#rrggbb`, else `fallback` (itself validated), else a palette color. */
+export const safeColor = (c: unknown, fallback?: string): string => {
+  if (typeof c === 'string' && SAFE_COLOR.test(c.trim())) return c.trim();
+  if (fallback !== undefined && SAFE_COLOR.test(fallback)) return fallback;
+  return PALETTE[0];
+};
+
+/** Trimmed, control characters stripped, at most 40 code points; `fallback` if empty. */
+export const safeName = (n: unknown, fallback: string): string => {
+  if (typeof n !== 'string') return fallback;
+  // Strips C0/C1 controls plus bidi overrides/isolates and zero-width chars that could spoof.
+  const cleaned = n.replace(/[\p{Cc}\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/gu, '').trim();
+  const name = Array.from(cleaned).slice(0, MAX_NAME).join('').trim();
+  return name || fallback;
+};
 
 class CaretWidget extends WidgetType {
   constructor(
@@ -181,7 +206,9 @@ function buildCursors(cursors: RemoteCursor[], len: number): DecorationSet {
     const head = clamp(c.head);
     const from = Math.min(anchor, head);
     const to = Math.max(anchor, head);
-    const style = `--weft-peer-color: ${c.color}`;
+    const color = safeColor(c.color, paletteColor(c.clientId));
+    const name = safeName(c.name, 'Anonymous');
+    const style = `--weft-peer-color: ${color}`;
     if (from < to) {
       ranges.push(
         Decoration.mark({
@@ -191,7 +218,7 @@ function buildCursors(cursors: RemoteCursor[], len: number): DecorationSet {
       );
     }
     ranges.push(
-      Decoration.widget({ widget: new CaretWidget(c.clientId, c.name, c.color), side: 1 }).range(
+      Decoration.widget({ widget: new CaretWidget(c.clientId, name, color), side: 1 }).range(
         head,
       ),
     );

@@ -7,7 +7,7 @@ import { defineConfig, type Plugin } from 'vite';
  * precache the whole app shell (JS, CSS, WASM, lazy chunks, icons) and changes on every deploy.
  */
 function serviceWorker(): Plugin {
-  const publicFiles = ['/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png'];
+  const publicFiles = ['/theme-init.js', '/manifest.webmanifest', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png'];
   return {
     name: 'weft-service-worker',
     apply: 'build',

@@ -23,6 +23,12 @@ pub mod error_code {
     pub const MALFORMED: u16 = 3;
     /// The server failed internally (e.g. storage).
     pub const INTERNAL: u16 = 4;
+    /// The document hit its size quota; further updates are rejected.
+    pub const TOO_LARGE: u16 = 5;
+    /// The client exceeded a per-IP or per-connection rate/connection limit.
+    pub const RATE_LIMITED: u16 = 6;
+    /// The server is at capacity (connections or open documents).
+    pub const OVERLOADED: u16 = 7;
 }
 
 #[derive(Debug, thiserror::Error)]

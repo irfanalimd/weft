@@ -161,6 +161,16 @@ impl DocLog {
         Ok(())
     }
 
+    /// Current size of the log file in bytes (snapshot plus appended records).
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    /// Number of records in the log (1 right after compaction).
+    pub fn records(&self) -> usize {
+        self.records
+    }
+
     /// fsyncs the log (used when a room unloads).
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_data()

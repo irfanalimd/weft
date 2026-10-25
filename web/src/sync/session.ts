@@ -14,6 +14,8 @@ import {
   collabExtension,
   remoteChangesSpec,
   safeColor,
+  safeName,
+  paletteColor,
   setRemoteCursors,
   type CollabHost,
   type LocalEdit,
@@ -117,7 +119,8 @@ export class Session implements DocSession {
     this.wc = wc;
     this.storage = storage;
     this.clientId = wc.clientId.toString();
-    this.user = loadUser();
+    const u = loadUser();
+    this.user = { name: safeName(u.name, 'Anonymous'), color: safeColor(u.color) };
     this.confirmedSv = loadConfirmed(docId);
     this.syncState = new Emitter<SyncState>({
       status: 'connecting',
@@ -173,8 +176,8 @@ export class Session implements DocSession {
   }
 
   setUser(user: User): void {
-    const name = user.name.trim().slice(0, 40) || this.user.name;
-    this.user = { name, color: safeColor(user.color) };
+    const name = safeName(user.name, this.user.name);
+    this.user = { name, color: safeColor(user.color, this.user.color) };
     saveUser(this.user);
     this.sendAwareness();
     this.schedulePeers();
@@ -269,7 +272,7 @@ export class Session implements DocSession {
       const id = a.clientId.toString();
       if (id === this.clientId) continue;
       if (a.payload === null) this.peers.delete(id);
-      else this.peers.set(id, parsePeer(a.payload, this.peers.get(id)));
+      else this.peers.set(id, parsePeer(id, a.payload, this.peers.get(id)));
     }
     if (peersChanged) {
       this.schedulePeers();
@@ -497,7 +500,7 @@ export class Session implements DocSession {
   }
 }
 
-function parsePeer(payload: string, prev: PeerInfo | undefined): PeerInfo {
+function parsePeer(id: string, payload: string, prev: PeerInfo | undefined): PeerInfo {
   let j: { name?: unknown; color?: unknown; cursor?: unknown } = {};
   try {
     j = JSON.parse(payload);
@@ -510,8 +513,8 @@ function parsePeer(payload: string, prev: PeerInfo | undefined): PeerInfo {
       ? { anchor: c.anchor, head: c.head }
       : null;
   return {
-    name: typeof j.name === 'string' && j.name.trim() ? j.name.slice(0, 40) : (prev?.name ?? 'Anonymous'),
-    color: safeColor(j.color ?? prev?.color),
+    name: safeName(j.name, prev?.name ?? 'Anonymous'),
+    color: safeColor(j.color, prev?.color ?? paletteColor(id)),
     cursor,
     lastActive: Date.now(),
   };
