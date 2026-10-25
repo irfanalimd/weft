@@ -740,7 +740,10 @@ as-is; the server's ping keepalive keeps idle connections alive.
 
 **Graceful shutdown**: on SIGTERM, stop accepting, send clients a close frame with a
 "server restarting" code (client reconnects with backoff, handshake re-syncs), flush/compact
-open rooms, exit. Add `axum::serve(...).with_graceful_shutdown(signal)` if not already present.
+open rooms, exit. `weft-server` already uses `with_graceful_shutdown`, but only on
+`tokio::signal::ctrl_c()` (SIGINT, `lib.rs:286`). Docker and Fly send **SIGTERM**, so also listen
+on `tokio::signal::unix::signal(SignalKind::terminate())`. Without that, every deploy is a hard kill
+(the log format makes it safe, but clients get no clean close).
 
 Other targets: `docker-compose.yml` (server + optional Caddy for TLS), a Render/Railway button,
 a k8s example (StatefulSet + PVC, 1 replica), a NixOS module / systemd unit for the binary.
