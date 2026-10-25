@@ -6,6 +6,7 @@ sync server. Read these before doing anything:
 - `docs/VISION.md`: what we're building and why (product principles, signature features).
 - `docs/ARCHITECTURE.md`: layout and the **frozen contracts** between components.
 - `PLAN.md`: milestone checklist with owners.
+- `docs/ROADMAP.md`: next steps and ambitious tracks (detailed files in `docs/roadmap/`).
 
 ## Rules
 
