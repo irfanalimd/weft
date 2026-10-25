@@ -14,23 +14,25 @@ merges on reconnect like any keystroke.
 
 ## 0. Ranking (usefulness x wow)
 
-| Rank | Feature | Usefulness | Wow | Effort | Depends on |
-|---|---|---|---|---|---|
-| 0 | **Foundation: LWW map CRDT in `weft-core`** | enabler | - | M (4-6 d) | - |
-| 1 | **Author attribution highlighting** | high | high | S (2-3 d) | 0 (names) |
-| 2 | **AI co-writer as a CRDT peer (Claude)** | high | very high | L (8-12 d) | 0, nicer with 5 |
-| 3 | **Comments & threads on `Anchor` ranges** | very high | medium | M (5-7 d) | 0 |
-| 4 | **Named versions + CRDT-native diff** | high | high | M (4-6 d) | 0 |
-| 5 | **Suggestion / track-changes mode** | high | high | L (8-10 d) | 0, 3 |
-| 6 | **Slash commands, tables, Mermaid/KaTeX** | high | medium | M (5-7 d) | - |
-| 7 | **Image paste + blob storage** | high | low | M (3-5 d) | - |
-| 8 | **Follow mode** | medium | high | S (1-2 d) | - |
-| 9 | **Mentions & notifications** | medium | low | M (3-5 d) | 0, 3 |
-| 10 | **Templates** | medium | low | S (1-2 d) | 6 nice |
-| 11 | **Folders / workspaces** | medium | low | M (4-6 d) | 0 |
-| 12 | **Voice huddle** | low-medium | high | L (6-10 d) | - |
+Rows are in ranked order. `§` is the section number below, and dependencies refer to sections.
 
-Suggested order: **0 → 1 → 3 → 2 → 4 → 8 → 6 → 5 → 7 → 9 → 10 → 11 → 12.** Attribution is the
+| Rank | § | Feature | Usefulness | Wow | Effort | Depends on |
+|---|---|---|---|---|---|---|
+| - | 1 | **Foundation: LWW map CRDT in `weft-core`** | enabler | - | M (4-6 d) | - |
+| 1 | 2 | **Author attribution highlighting** | high | high | S (2-3 d) | §1 (names) |
+| 2 | 3 | **AI co-writer as a CRDT peer (Claude)** | high | very high | L (8-12 d) | §1; better with §6, §9 |
+| 3 | 4 | **Comments & threads on `Anchor` ranges** | very high | medium | M (5-7 d) | §1 |
+| 4 | 5 | **Named versions + CRDT-native diff** | high | high | M (4-6 d) | §1 |
+| 5 | 6 | **Suggestion / track-changes mode** | high | high | L (8-10 d) | §1, §4 |
+| 6 | 7 | **Slash commands, tables, Mermaid/KaTeX** | high | medium | M (5-7 d) | - |
+| 7 | 8 | **Image paste + blob storage** | high | low | M (3-5 d) | - |
+| 8 | 9 | **Follow mode** | medium | high | S (1-2 d) | - |
+| 9 | 10 | **Mentions & notifications** | medium | low | M (3-5 d) | §1, §4 |
+| 10 | 11 | **Templates** | medium | low | S (1-2 d) | §7 nice |
+| 11 | 12 | **Folders / workspaces** | medium | low | M (4-6 d) | §1 |
+| 12 | 13 | **Voice huddle** | low-medium | high | L (6-10 d) | - |
+
+Suggested build order by section: **§1 → §2 → §9 → §4 → §3 → §5 → §7 → §6 → §8 → §10 → §11 → §12 → §13.** Attribution is the
 cheapest demo win (the data is already there). Comments are the most-requested collaboration
 feature. The AI peer is the headline demo. Follow mode is a 1-day wow that lines up with the AI
 demo ("follow Claude while it writes").
@@ -202,7 +204,7 @@ export const attribution = StateField.define<DecorationSet>({
 **User value + wow.** This is the headline demo. Claude joins the doc like a person: it gets an
 avatar in the presence bar, a labelled cursor, and text that streams in character by character as
 real CRDT ops. Humans keep typing elsewhere at the same time with no conflicts, because Claude is
-just another replica. Everything it writes is attributed (feature 2), undoable by author ("reject
+just another replica. Everything it writes is attributed (§2), undoable by author ("reject
 all of Claude's edits"), and visible in time travel.
 
 **UX.**
@@ -210,13 +212,13 @@ all of Claude's edits"), and visible in time travel.
 - **Actions**:
   - *Continue writing* at the cursor.
   - *Rewrite selection* (shorter / clearer / formal / fix grammar / custom prompt).
-    Lands as a **suggestion** (feature 6) when that exists, otherwise as a direct edit.
+    Lands as a **suggestion** (§6) when that exists, otherwise as a direct edit.
   - *Summarize doc*: inserts a `> **Summary**` callout at the top, or posts it as a comment.
   - *Meeting notes → action items*: extracts `- [ ] @owner task (due)` checklist items into an
-    `## Action items` section, with @-mentions resolving to `clients/` names (feature 9).
+    `## Action items` section, with @-mentions resolving to `clients/` names (§10).
   - *Answer a comment*: mention `@claude` in a comment thread to get a threaded reply.
 - **Presence**: "Claude" avatar with a sparkle badge and its own color. Its cursor moves to where
-  it's writing. Follow mode (feature 8) lets you watch it.
+  it's writing. Follow mode (§9) lets you watch it.
 - **Control**: a floating chip "Claude is writing… [Stop] [Undo]". Stop cancels the stream. Undo
   deletes exactly the items with Claude's client id from that job.
 
@@ -237,7 +239,7 @@ Browser ──(Message::AiRequest)──► weft-server Room ──► AiAgent t
   the FugueMax property we already test.
 - **Batching**: coalesce deltas every ~40-60 ms into one `Update` (fewer frames, still feels live).
 - **Rewrite selection** = stream the replacement *after* the selection end anchor, then delete the
-  original range in one op when the stream completes. With suggestion mode, both become a
+  original range in one op when the stream completes. With suggestion mode (§6), both become a
   suggestion instead.
 - **Structured edits** (action items, multi-location edits): use tool use with tools such as
   `insert_at(anchor_hint, text)`, `replace(quote, text)`, `add_comment(quote, body)`. Tool inputs
@@ -316,7 +318,7 @@ registerCommand({ id: "ai.rewrite", title: "Claude: Rewrite selection…", key: 
 - [ ] Phase A: deterministic test with a mock SSE server; a human edits concurrently above/at the AI anchor and all replicas converge
 - [ ] Phase B, *Rewrite selection*, *Summarize*, *Action items* (tool use; quote→anchor mapping)
 - [ ] Phase B: "Undo Claude's job" (delete items by `(ai client, clock range)` recorded in `ai/jobs/<id>`)
-- [ ] Phase C: rewrites land as suggestions (needs feature 6); `@claude` in comment threads
+- [ ] Phase C: rewrites land as suggestions (needs §6); `@claude` in comment threads
 - [ ] Phase C: model picker in settings, prompt caching, per-doc token budget, usage display
 - [ ] Phase D: browser-side BYO-key mode for E2EE docs; inline ghost-text autocomplete with Haiku (opt-in)
 
@@ -455,7 +457,7 @@ reviewers expect it, and it's also the safe landing zone for AI rewrites.
 - A mode switch in the top bar: **Editing ▾ / Suggesting / Viewing** (`⌘⇧E`).
 - In Suggesting, typed text appears green-underlined. Deleted text is not removed but shown red and
   struck through. A margin card per suggestion shows "Sam: replace 'quick' with 'fast'
-  [✓ Accept] [✕ Reject]", plus a reply thread (reuses comments).
+  [✓ Accept] [✕ Reject]", plus a reply thread (reuses §4 comments).
 - "Accept all / Reject all", filter by author ("Accept all from Claude").
 - Export and the `text()` used by `export.md` show the doc **without** pending suggestions by
   default ("Final"), or with them ("Markup").
@@ -705,7 +707,7 @@ nodes/<nodeId> = { kind: "folder"|"doc", name, parent: <nodeId>|null, order: "<f
 Slack huddle feel. It's lower priority because most groups already have a call open.
 
 **UX.** A headphone button in the presence bar starts a huddle. Speaking avatars get a pulsing ring,
-with mute/deafen controls. Auto-follow the speaker (optional, uses feature 9). Up to 6 people.
+with mute/deafen controls. Auto-follow the speaker (optional, uses §9). Up to 6 people.
 
 **Data model.** Ephemeral only. `inHuddle`, `muted`, and `speaking` go in awareness. Signalling uses
 a new `Message::Signal { to: ClientId, payload }` relayed by the room (additive to the wire enum).
