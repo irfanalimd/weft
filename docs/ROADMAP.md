@@ -25,6 +25,19 @@ moonshots. Each track has its own detailed file, with research, a phased plan, i
 - [ ] Commit the Playwright E2E scripts (`web/e2e/`) as an optional `npm run e2e`
 - [ ] Handle SIGTERM for graceful shutdown (`weft-server` only handles Ctrl-C today, `crates/weft-server/src/lib.rs:286`), which is a prerequisite for Docker/Fly
 - [ ] Dockerfile and a deploy to a public URL, so people can try it
+- [ ] **Security Phase 0 before going public** (4–6 days, no protocol change, see track 2):
+  - cut the frame cap from 16 MiB to 1 MiB
+  - add rate limits, connection caps and per-doc size quotas
+  - add a first-message deadline and an Origin check
+  - bind presence messages to the connection's client id
+  - limit the core's buffer for out-of-order ops
+  - validate peer names and colours
+  - add security headers
+
+## Decisions needed
+
+- [ ] **E2EE vs "the server is a replica"**: end-to-end encryption turns the server into a blind ciphertext relay, which means no
+      server-side merge, export or AI on encrypted docs. Proposal: make E2EE per-doc and opt-in (tracks 2, 3 and 5 all depend on this).
 
 ## Suggested sequencing
 
