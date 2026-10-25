@@ -283,13 +283,31 @@ pub async fn run(config: Config) -> io::Result<()> {
         "weft-server listening"
     );
     axum::serve(listener, app(state.clone(), config.static_dir))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
     state.sync_all();
     Ok(())
+}
+
+/// Resolves on Ctrl-C, or on SIGTERM (what systemd, Docker and Fly send to stop a service).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = term => {}
+    }
+    tracing::info!("shutting down");
 }
 
 async fn ws_route(

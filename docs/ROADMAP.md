@@ -23,7 +23,7 @@ moonshots. Each track has its own detailed file, with research, a phased plan, i
 - [ ] Investigate the rare unsynced-count overcount (seen 1 of 5 runs)
 - [ ] Real-phone pass and a `prefers-reduced-motion` check
 - [ ] Commit the Playwright E2E scripts (`web/e2e/`) as an optional `npm run e2e`
-- [ ] Handle SIGTERM for graceful shutdown (`weft-server` only handles Ctrl-C today, `crates/weft-server/src/lib.rs:286`), which is a prerequisite for Docker/Fly
+- [x] Handle SIGTERM for graceful shutdown (`weft-server` only handles Ctrl-C today, `crates/weft-server/src/lib.rs:286`), which is a prerequisite for Docker/Fly
 - [ ] Dockerfile and a deploy to a public URL, so people can try it
 - [ ] **Security Phase 0 before going public** (4–6 days, no protocol change, see track 2):
   - cut the frame cap from 16 MiB to 1 MiB
