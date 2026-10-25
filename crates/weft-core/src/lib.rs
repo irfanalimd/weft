@@ -3,8 +3,21 @@
 //! A run-length-encoded sequence CRDT for collaborative text. Positions are UTF-16 code units.
 //! See `docs/ARCHITECTURE.md` §1 for the frozen contract.
 //!
-//! NOTE: this file is a contract stub. Signatures are frozen; bodies are `todo!()` until M1 lands.
+//! Algorithm: FugueMax (in the equivalent YjsMod formulation) over run-length-encoded items with
+//! left/right origins. Deletes are ops with their own ids, so a [`StateVector`] identifies a
+//! version exactly; that enables delta sync ([`Doc::encode_diff`]) and time travel
+//! ([`Doc::text_at`]).
 
+mod doc;
+mod encoding;
+mod merge;
+mod seq;
+mod undo;
+
+pub use doc::Doc;
+pub use undo::{UndoManager, UndoResult};
+
+use encoding::{Reader, VERSION, err, write_var};
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -19,7 +32,7 @@ pub struct Id {
 
 /// `client -> next expected clock`. Identifies a version of a document.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StateVector(BTreeMap<ClientId, u64>);
+pub struct StateVector(pub(crate) BTreeMap<ClientId, u64>);
 
 impl StateVector {
     pub fn get(&self, client: ClientId) -> u64 {
@@ -30,12 +43,48 @@ impl StateVector {
         id.clock < self.get(id.client)
     }
 
+    /// `[version][varint n][(varint client, varint clock) x n]`, sorted by client.
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut buf = vec![VERSION];
+        write_var(&mut buf, self.0.len() as u64);
+        for (&c, &k) in &self.0 {
+            write_var(&mut buf, c);
+            write_var(&mut buf, k);
+        }
+        buf
     }
 
-    pub fn decode(_bytes: &[u8]) -> Result<Self, DecodeError> {
-        todo!()
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != VERSION {
+            return Err(err("unsupported state vector version"));
+        }
+        let n = r.count()?;
+        let mut m = BTreeMap::new();
+        for _ in 0..n {
+            let c = r.var()?;
+            let k = r.var()?;
+            if k > 0 {
+                let e = m.entry(c).or_insert(0);
+                *e = k.max(*e);
+            }
+        }
+        r.finish()?;
+        Ok(StateVector(m))
+    }
+
+    /// Set the next expected clock for `client` (0 removes the entry).
+    pub fn set(&mut self, client: ClientId, clock: u64) {
+        if clock == 0 {
+            self.0.remove(&client);
+        } else {
+            self.0.insert(client, clock);
+        }
+    }
+
+    /// True if every op in `other` is also in `self`.
+    pub fn covers(&self, other: &StateVector) -> bool {
+        other.iter().all(|(c, k)| self.get(c) >= k)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (ClientId, u64)> + '_ {
@@ -48,12 +97,15 @@ impl StateVector {
 pub struct Update(pub Vec<u8>);
 
 impl Update {
+    /// True if the update contains no ops (or is zero bytes long).
     pub fn is_empty(&self) -> bool {
-        todo!()
+        self.0.is_empty() || encoding::op_count(&self.0) == Ok(0)
     }
 
-    pub fn merge(_updates: &[Update]) -> Result<Update, DecodeError> {
-        todo!()
+    /// Merge several updates into one compact update without a `Doc`. Applying the result is
+    /// equivalent to applying each input.
+    pub fn merge(updates: &[Update]) -> Result<Update, DecodeError> {
+        merge::merge(updates)
     }
 }
 
@@ -74,12 +126,37 @@ pub enum Anchor {
 }
 
 impl Anchor {
+    /// `[version][tag: 0 Start | 1 End | 2 After][varint client, varint clock]`.
     pub fn encode(&self) -> Vec<u8> {
-        todo!()
+        let mut buf = vec![VERSION];
+        match self {
+            Anchor::Start => buf.push(0),
+            Anchor::End => buf.push(1),
+            Anchor::After(id) => {
+                buf.push(2);
+                write_var(&mut buf, id.client);
+                write_var(&mut buf, id.clock);
+            }
+        }
+        buf
     }
 
-    pub fn decode(_bytes: &[u8]) -> Result<Self, DecodeError> {
-        todo!()
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(bytes);
+        if r.u8()? != VERSION {
+            return Err(err("unsupported anchor version"));
+        }
+        let a = match r.u8()? {
+            0 => Anchor::Start,
+            1 => Anchor::End,
+            2 => Anchor::After(Id {
+                client: r.var()?,
+                clock: r.var()?,
+            }),
+            _ => return Err(err("bad anchor tag")),
+        };
+        r.finish()?;
+        Ok(a)
     }
 }
 
@@ -95,80 +172,3 @@ impl fmt::Display for DecodeError {
 }
 
 impl std::error::Error for DecodeError {}
-
-/// A replica of a collaborative text document.
-pub struct Doc {
-    client: ClientId,
-}
-
-impl Doc {
-    pub fn new(client: ClientId) -> Self {
-        Doc { client }
-    }
-
-    pub fn client_id(&self) -> ClientId {
-        self.client
-    }
-
-    pub fn text(&self) -> String {
-        todo!()
-    }
-
-    pub fn len_utf16(&self) -> usize {
-        todo!()
-    }
-
-    /// Insert `text` at UTF-16 position `pos`. Returns the update to broadcast.
-    pub fn insert(&mut self, _pos: usize, _text: &str) -> Update {
-        todo!()
-    }
-
-    /// Delete `len` UTF-16 units starting at `pos`. Returns the update to broadcast.
-    pub fn delete(&mut self, _pos: usize, _len: usize) -> Update {
-        todo!()
-    }
-
-    pub fn state_vector(&self) -> StateVector {
-        todo!()
-    }
-
-    /// All ops not covered by `since`.
-    pub fn encode_diff(&self, _since: &StateVector) -> Update {
-        todo!()
-    }
-
-    pub fn encode_full(&self) -> Update {
-        self.encode_diff(&StateVector::default())
-    }
-
-    /// Idempotent and commutative. Returns the changes to apply to a view.
-    pub fn apply_update(&mut self, _update: &Update) -> Result<Vec<Change>, DecodeError> {
-        todo!()
-    }
-
-    pub fn has_pending(&self) -> bool {
-        todo!()
-    }
-
-    pub fn anchor_at(&self, _pos: usize) -> Anchor {
-        todo!()
-    }
-
-    pub fn resolve_anchor(&self, _anchor: &Anchor) -> Option<usize> {
-        todo!()
-    }
-
-    /// Number of op runs integrated, in local (causal) integration order.
-    pub fn op_count(&self) -> usize {
-        todo!()
-    }
-
-    /// Version after the first `step` integrated op runs.
-    pub fn version_at(&self, _step: usize) -> StateVector {
-        todo!()
-    }
-
-    pub fn text_at(&self, _version: &StateVector) -> String {
-        todo!()
-    }
-}

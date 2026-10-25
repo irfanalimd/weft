@@ -1,0 +1,138 @@
+/* Design tokens. Light is the default; dark comes from the OS or a manual toggle (html[data-theme]). */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --bg: #fbfbfa;
+  --bg-elev: #ffffff;
+  --bg-sunken: #f2f2ef;
+  --bg-hover: rgba(20, 20, 30, 0.05);
+  --bg-active: rgba(20, 20, 30, 0.08);
+  --scrim: rgba(18, 18, 24, 0.28);
+
+  /* Text */
+  --text: #1c1c1f;
+  --text-2: #5b5b63;
+  --text-3: #8f8f97;
+  --text-on-accent: #ffffff;
+
+  /* Lines */
+  --border: rgba(20, 20, 30, 0.08);
+  --border-strong: rgba(20, 20, 30, 0.15);
+
+  /* The one accent */
+  --accent: #5b5bd6;
+  --accent-strong: #4a4ac4;
+  --accent-soft: rgba(91, 91, 214, 0.12);
+  --selection: rgba(91, 91, 214, 0.18);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(91, 91, 214, 0.55);
+
+  /* Status (muted, used only for small dots) */
+  --ok: #2e9e6b;
+  --warn: #c58a16;
+  --danger: #d1453b;
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px rgba(16, 16, 24, 0.06), 0 1px 1px rgba(16, 16, 24, 0.04);
+  --shadow-2: 0 10px 30px -8px rgba(16, 16, 24, 0.18), 0 2px 6px rgba(16, 16, 24, 0.06);
+  --shadow-3: 0 24px 60px -12px rgba(16, 16, 24, 0.28), 0 4px 12px rgba(16, 16, 24, 0.08);
+
+  /* Type */
+  --font-ui: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-text: var(--font-ui);
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+  --text-size: 18px;
+  --text-leading: 1.72;
+  --ui-size: 14px;
+  --measure: 72ch;
+
+  /* Shape */
+  --radius-s: 6px;
+  --radius-m: 10px;
+  --radius-l: 14px;
+
+  /* Layout */
+  --topbar-h: 56px;
+  --gutter: 24px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --dur-1: 120ms;
+  --dur-2: 220ms;
+  --dur-3: 420ms;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --bg: #151517;
+    --bg-elev: #1e1e22;
+    --bg-sunken: #1b1b1f;
+    --bg-hover: rgba(255, 255, 255, 0.06);
+    --bg-active: rgba(255, 255, 255, 0.1);
+    --scrim: rgba(0, 0, 0, 0.5);
+    --text: #e6e6e9;
+    --text-2: #a3a3ab;
+    --text-3: #6f6f78;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.15);
+    --accent: #8d8ef8;
+    --accent-strong: #a3a4ff;
+    --accent-soft: rgba(141, 142, 248, 0.16);
+    --selection: rgba(141, 142, 248, 0.26);
+    --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(141, 142, 248, 0.6);
+    --text-on-accent: #121214;
+    --ok: #4cc38a;
+    --warn: #e0a83a;
+    --danger: #ef6a5e;
+    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-2: 0 12px 32px -8px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --shadow-3: 0 24px 70px -12px rgba(0, 0, 0, 0.7), 0 4px 12px rgba(0, 0, 0, 0.35);
+  }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #151517;
+  --bg-elev: #1e1e22;
+  --bg-sunken: #1b1b1f;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --text: #e6e6e9;
+  --text-2: #a3a3ab;
+  --text-3: #6f6f78;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --accent: #8d8ef8;
+  --accent-strong: #a3a4ff;
+  --accent-soft: rgba(141, 142, 248, 0.16);
+  --selection: rgba(141, 142, 248, 0.26);
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px rgba(141, 142, 248, 0.6);
+  --text-on-accent: #121214;
+  --ok: #4cc38a;
+  --warn: #e0a83a;
+  --danger: #ef6a5e;
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 12px 32px -8px rgba(0, 0, 0, 0.6), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --shadow-3: 0 24px 70px -12px rgba(0, 0, 0, 0.7), 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 640px) {
+  :root {
+    --text-size: 17px;
+    --text-leading: 1.66;
+    --topbar-h: 52px;
+    --gutter: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 1ms;
+    --dur-2: 1ms;
+    --dur-3: 1ms;
+  }
+}

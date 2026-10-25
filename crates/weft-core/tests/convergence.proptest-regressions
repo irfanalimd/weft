@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8aba10da30f5be67ded9411b1762330fb9b8c000ecfdad7a116106071ee5d398 # shrinks to n = 4, actions = [(3, 0, 0, 0, "aaa"), (3, 0, 0, 0, "👩\u{200d}👩\u{200d}👧a"), (0, 0, 0, 0, "a"), (0, 0, 0, 0, "a"), (0, 0, 0, 0, "a"), (0, 0, 0, 0, "a"), (3, 0, 0, 0, "a"), (3, 4, 907569142819376778, 994792269614999258, "中bb"), (0, 0, 7825911673771042160, 6094794920681464746, "😀"), (1, 2, 16938049437879916010, 11173702082541713107, "xyz😀"), (1, 9, 3683710366490510486, 2438303623817349891, "\nb"), (2, 2, 16327928183201260169, 142941388352291956, "b😀xyz"), (3, 4, 1334568583697662287, 8439365281130698032, "xyz中中"), (0, 1, 5298156591429783461, 10651431527421445778, "ba"), (1, 8, 10766759193093772234, 1856652272286093868, "\né")], seed = 1924090881037472295

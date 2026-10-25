@@ -1,0 +1,388 @@
+/* Writing surface: live Markdown styling (classes come from src/editor/markdown.ts). */
+
+.weft-editor .cm-editor {
+  font-family: var(--font-text);
+  font-size: var(--text-size);
+  line-height: var(--text-leading);
+  color: var(--text);
+  background: transparent;
+}
+
+/* Headings: the whole line is sized so the "#" marks scale with it. */
+.cm-md-h1,
+.cm-md-h2,
+.cm-md-h3,
+.cm-md-h4,
+.cm-md-h5,
+.cm-md-h6 {
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: -0.012em;
+}
+
+.cm-md-h1 {
+  padding-top: 0.5em !important;
+  padding-bottom: 0.15em !important;
+  font-size: 1.8em;
+  letter-spacing: -0.022em;
+}
+
+.cm-md-h2 {
+  padding-top: 0.65em !important;
+  padding-bottom: 0.1em !important;
+  font-size: 1.42em;
+  letter-spacing: -0.018em;
+}
+
+.cm-md-h3 {
+  padding-top: 0.55em !important;
+  font-size: 1.18em;
+}
+
+.cm-md-h4,
+.cm-md-h5,
+.cm-md-h6 {
+  padding-top: 0.4em !important;
+  font-size: 1em;
+}
+
+.cm-md-h6 {
+  color: var(--text-2);
+}
+
+.cm-line:first-child.cm-md-h1,
+.cm-line:first-child.cm-md-h2,
+.cm-line:first-child.cm-md-h3 {
+  padding-top: 0 !important;
+}
+
+/* Markup characters (#, *, `, >, [ ]( )) stay visible but quiet. */
+.cm-md-mark {
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.cm-md-h1 .cm-md-mark,
+.cm-md-h2 .cm-md-mark,
+.cm-md-h3 .cm-md-mark {
+  color: color-mix(in srgb, var(--text-3) 70%, transparent);
+}
+
+.cm-md-em {
+  font-style: italic;
+}
+
+.cm-md-strong {
+  font-weight: 700;
+}
+
+.cm-md-strike {
+  text-decoration: line-through;
+  text-decoration-color: var(--text-3);
+  color: var(--text-2);
+}
+
+.cm-md-link {
+  color: var(--accent);
+}
+
+.cm-md-url {
+  color: var(--text-3);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+
+.cm-md-link .cm-md-url {
+  text-decoration: none;
+}
+
+.cm-md-label {
+  color: var(--text-3);
+}
+
+.cm-md-list-mark {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.cm-md-inline-code {
+  padding: 0.12em 0.32em;
+  border-radius: 5px;
+  background: var(--bg-sunken);
+  box-shadow: inset 0 0 0 1px var(--border);
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.cm-md-inline-code .cm-md-mark {
+  color: var(--text-3);
+}
+
+/* Blockquotes */
+.cm-md-quote {
+  position: relative;
+  padding-left: 1.1em !important;
+  color: var(--text-2);
+}
+
+.cm-md-quote::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0.15em;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent-soft);
+}
+
+/* Fenced and indented code blocks. (Never put margins on .cm-line: CodeMirror measures line heights.) */
+.cm-md-codeblock {
+  padding-left: 1em !important;
+  padding-right: 1em !important;
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 0.84em;
+  line-height: 1.65;
+  box-shadow: inset 1px 0 0 var(--border), inset -1px 0 0 var(--border);
+}
+
+.cm-md-codeblock-first {
+  padding-top: 0.5em !important;
+  border-top-left-radius: var(--radius-m);
+  border-top-right-radius: var(--radius-m);
+  box-shadow: inset 1px 0 0 var(--border), inset -1px 0 0 var(--border), inset 0 1px 0 var(--border);
+}
+
+.cm-md-codeblock-last {
+  padding-bottom: 0.5em !important;
+  border-bottom-left-radius: var(--radius-m);
+  border-bottom-right-radius: var(--radius-m);
+  box-shadow: inset 1px 0 0 var(--border), inset -1px 0 0 var(--border), inset 0 -1px 0 var(--border);
+}
+
+.cm-md-codeblock-first.cm-md-codeblock-last {
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.cm-md-codeblock .cm-md-mark,
+.cm-md-codeblock .cm-md-label {
+  color: var(--text-3);
+}
+
+/* Syntax colours inside code blocks: restrained, mostly one hue. */
+.tok-keyword {
+  color: var(--accent);
+}
+
+.tok-string {
+  color: #2f8a5b;
+}
+
+.tok-comment {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+.tok-number,
+.tok-atom,
+.tok-bool {
+  color: #b5632a;
+}
+
+.tok-fn {
+  color: #2f6fb5;
+}
+
+.tok-type {
+  color: #a04ab0;
+}
+
+:root[data-theme='dark'] .tok-string {
+  color: #79c99a;
+}
+
+:root[data-theme='dark'] .tok-number,
+:root[data-theme='dark'] .tok-atom,
+:root[data-theme='dark'] .tok-bool {
+  color: #e3a26c;
+}
+
+:root[data-theme='dark'] .tok-fn {
+  color: #7fb2ec;
+}
+
+:root[data-theme='dark'] .tok-type {
+  color: #d29be0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .tok-string {
+    color: #79c99a;
+  }
+
+  :root:not([data-theme='light']) .tok-number,
+  :root:not([data-theme='light']) .tok-atom,
+  :root:not([data-theme='light']) .tok-bool {
+    color: #e3a26c;
+  }
+
+  :root:not([data-theme='light']) .tok-fn {
+    color: #7fb2ec;
+  }
+
+  :root:not([data-theme='light']) .tok-type {
+    color: #d29be0;
+  }
+}
+
+/* Horizontal rule */
+.cm-md-hr {
+  color: var(--text-3);
+  background: linear-gradient(var(--border-strong), var(--border-strong)) right center / calc(100% - 4ch) 1px no-repeat;
+}
+
+/* Task checkboxes */
+.cm-md-task {
+  position: relative;
+  display: inline-block;
+  width: 1.05em;
+  height: 1.05em;
+  margin: 0 0.3em 0 0.05em;
+  padding: 0;
+  border: 1.5px solid var(--text-3);
+  border-radius: 5px;
+  background: var(--bg);
+  vertical-align: -0.16em;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  transition: background-color var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease),
+    transform var(--dur-1) var(--ease);
+}
+
+.cm-md-task:hover {
+  border-color: var(--accent);
+}
+
+.cm-md-task:active {
+  transform: scale(0.92);
+}
+
+.cm-md-task:checked {
+  border-color: var(--accent);
+  background: var(--accent)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3.5 8.5l3 3 6-7' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")
+    center / 80% no-repeat;
+}
+
+.cm-md-task-done {
+  color: var(--text-3);
+  text-decoration: line-through;
+  text-decoration-color: var(--border-strong);
+}
+
+/* Focus mode: everything but the current paragraph recedes. */
+.cm-line {
+  transition: opacity var(--dur-3) var(--ease);
+}
+
+.cm-dim {
+  opacity: 0.22;
+}
+
+/* Brief highlight when jumping to a collaborator's cursor. */
+.cm-flash-line {
+  animation: flash-line 1.4s var(--ease) both;
+}
+
+@keyframes flash-line {
+  0%,
+  30% {
+    background-color: var(--flash, var(--accent-soft));
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+/* ---------- Remote cursors (rendered by src/sync, or the ?mock session) ---------- */
+
+.weft-editor .cm-content .weft-remote-selection {
+  background-color: color-mix(in srgb, var(--weft-peer-color, var(--accent)) 22%, transparent);
+  border-radius: 2px;
+}
+
+.weft-editor .cm-content .weft-remote-cursor {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1.2em;
+  margin: 0 -1px;
+  border-left: 2px solid var(--weft-peer-color, var(--accent));
+  vertical-align: text-bottom;
+  pointer-events: none;
+  word-break: normal;
+}
+
+.weft-editor .cm-content .weft-remote-cursor::before {
+  content: '';
+  position: absolute;
+  top: -3px;
+  left: -4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--weft-peer-color, var(--accent));
+}
+
+.weft-editor .cm-content .weft-remote-label {
+  position: absolute;
+  bottom: calc(100% + 2px);
+  left: -2px;
+  z-index: 5;
+  padding: 1px 6px 2px;
+  border-radius: 4px 4px 4px 1px;
+  background: var(--weft-peer-color, var(--accent));
+  color: #fff;
+  font: 600 11px/1.4 var(--font-ui);
+  font-style: normal;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-decoration: none;
+  user-select: none;
+  pointer-events: none;
+  transition: opacity var(--dur-3) var(--ease), transform var(--dur-3) var(--ease);
+}
+
+/* Labels fade out after a while; the caret stays. */
+.weft-editor .cm-content .weft-remote-cursor.is-idle .weft-remote-label,
+.weft-editor .cm-content .weft-remote-label.is-idle {
+  opacity: 0;
+  transform: translateY(2px);
+}
+
+.weft-editor .cm-md-h1 .weft-remote-label,
+.weft-editor .cm-md-h2 .weft-remote-label,
+.weft-editor .cm-md-h3 .weft-remote-label,
+.weft-editor .cm-md-codeblock .weft-remote-label,
+.weft-editor .cm-md-inline-code .weft-remote-label {
+  font-size: 11px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+}
+
+.weft-editor .cm-dim .weft-remote-label {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cm-flash-line {
+    animation: none;
+  }
+}
