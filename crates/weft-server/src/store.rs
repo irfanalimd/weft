@@ -27,7 +27,12 @@ pub struct DocStore {
 impl DocStore {
     /// Uses `<data_dir>/docs`, creating it if needed.
     pub fn new(data_dir: &Path) -> io::Result<Self> {
-        let dir = data_dir.join("docs");
+        Self::in_subdir(data_dir, "docs")
+    }
+
+    /// Uses `<data_dir>/<sub>` (e.g. `notes` for private notes), creating it if needed.
+    pub fn in_subdir(data_dir: &Path, sub: &str) -> io::Result<Self> {
+        let dir = data_dir.join(sub);
         fs::create_dir_all(&dir)?;
         Ok(DocStore {
             dir,
@@ -42,6 +47,11 @@ impl DocStore {
 
     pub fn exists(&self, doc_id: &str) -> bool {
         self.path(doc_id).exists()
+    }
+
+    /// Deletes a document's log.
+    pub fn remove(&self, doc_id: &str) -> io::Result<()> {
+        fs::remove_file(self.path(doc_id))
     }
 
     /// Replays the log (creating it if missing). Returns the valid records and an appender.

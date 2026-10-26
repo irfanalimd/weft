@@ -6,6 +6,8 @@
 
 import type { OpenSession } from './types';
 import { Session } from './session';
+import { clearStates } from './storage';
+import { initWasm } from './wasm';
 
 export * from './types';
 export { remoteEdit } from './collab';
@@ -17,3 +19,21 @@ export { randomUser, PALETTE } from './identity';
  * in the background.
  */
 export const openSession: OpenSession = (docId, opts) => Session.open(docId, opts);
+
+/** Start loading the WASM engine early (e.g. on the Wall), so opening a note is instant. */
+export function warmUp(): void {
+  void initWasm().catch(() => undefined);
+}
+
+/** Forget every locally stored private note (IndexedDB + confirmed markers), e.g. on sign-out. */
+export async function clearLocalNotes(): Promise<void> {
+  await clearStates('note:');
+  try {
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (k?.startsWith('weft:confirmed:note:')) localStorage.removeItem(k);
+    }
+  } catch {
+    /* storage blocked */
+  }
+}

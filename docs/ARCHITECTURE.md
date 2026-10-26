@@ -272,6 +272,22 @@ The TS session layer produces and consumes this; the server treats it as opaque 
   `into_make_service_with_connect_info::<SocketAddr>()`, which `app()` requires for `/ws`.
 - **Presence binding**: a connection's `Awareness` frames must carry the `client_id` of its first
   valid `Hello`; others (and any sent before `Hello`) are dropped silently.
+- **Accounts and private notes** (Weft Wall, full contract in `docs/WALL.md`): SQLite at
+  `$WEFT_DATA_DIR/weft.db` (modules `db`, `auth`, `api`), note logs in `$WEFT_DATA_DIR/notes/`
+  (a second `DocStore`; the room registry is keyed by `RoomKey::{Doc, Note}`, so the namespaces never
+  collide). `/ws/n/:id` requires the owner's `weft_session` cookie (401/403/404 before the upgrade);
+  revoking a session or disabling a user closes its sockets (close code 4001). All `/api/*` and
+  `/ws/n/*` requests pass one middleware: non-GET requests need the WebSocket `Origin` check and
+  `Content-Type: application/json` (logout exempt; else 403/415), then the session is looked up
+  (sliding 30-day expiry, cookie re-sent when extended, at most daily). Note seeds (`text`, `from_doc`)
+  are written as one insert by `SERVER_CLIENT_ID` (`0x5745465453455256`). Title = first non-empty line
+  (heading `#`s stripped, 120 chars); preview = the text after it (280 chars); refreshed ≤ every 2 s per
+  note and on unload/shutdown. Search: each term becomes a quoted prefix query `"term"*`, ANDed.
+
+  | Env var | Default | Effect |
+  |---|---|---|
+  | `WEFT_BOOTSTRAP_TOKEN` | unset | enables `POST /api/auth/setup` while no users exist; min 32 chars (shorter refuses to start); unset = setup disabled |
+  | `WEFT_ANONYMOUS_DOCS` | `true` | `false` makes `/ws/:id` and `/api/docs/:id/export.md` answer 404 and disables `from_doc` |
 
 ---
 
@@ -356,3 +372,6 @@ lets UI work proceed before the real layer exists.
 | 2026-10-25 | web UI (D) | Not a contract change, a coordination note: added npm dep `qrcode-generator` (lazy-loaded for the Share QR code). `vite.config.ts` now emits `/sw.js` from `web/src/pwa/sw.js` with the build's file list (app-shell precache incl. WASM); it skips `/api/*`, `/ws/*`, `/healthz`. The UI imports `randomUser` from `src/sync/index.ts`. | Offline app shell; share to phones |
 | 2026-10-25 | weft-wasm | Added `WeftClient.countNotIn(sv)` (empty `sv` = nothing confirmed) | Lead: the unsynced count survives reloads; the session persists the last confirmed SV in `localStorage["weft:confirmed:<doc>"]` |
 | 2026-10-25 | weft-core, weft-sync, weft-server (security Phase 0) | Additive. **core**: `pub const MAX_PENDING_UNITS = 100_000`, `MAX_PENDING_BYTES = 8 MiB`; `apply_update` returns `Err` when an update's out-of-order ops would overflow the pending queue (ops that don't fit are discarded; ops that could integrate stay integrated); pending dedup is now O(1). **sync**: `error_code::TOO_LARGE`=5, `RATE_LIMITED`=6, `OVERLOADED`=7. **server**: `Limits` (+ `Config.limits`, `AppState::with_limits`), env vars in §3, max frame 1 MiB, `Origin` check (403), real client IP via loopback-only `X-Forwarded-For`, per-IP/global connection caps, per-connection message token bucket, `Hello` deadline, doc size quota, room cap, awareness bound to the `Hello` client id; `DocLog::bytes()`/`records()`. **web**: peer names/colors sanitized (`safeName`, `safeColor` now `#rrggbb` only, `paletteColor`). | Public deployment: abuse/DoS protection without a protocol change |
+| 2026-10-26 | weft-server (W1) | Additive: accounts, sessions, notes and admin HTTP API per `docs/WALL.md`; `/ws/n/:id`; `weft.db` + `notes/`; env `WEFT_BOOTSTRAP_TOKEN`, `WEFT_ANONYMOUS_DOCS`; CSRF middleware on `/api` (non-GET needs JSON content type + Origin check). Unknown `/api/*` → 404 now carries a JSON `{error}` body. Library: `AppState::open(&Config)` replaces `AppState::new/with_limits`; `Config` gains `bootstrap_token`, `anonymous_docs`; `DocStore::in_subdir`, `DocStore::remove`. `examples/ws_client.rs` reads `COOKIE`/`ORIGIN` env vars. | Weft Wall phase W1 |
+| 2026-10-26 | weft-server (W4) | Anonymous docs and their sockets may use at most 3/4 of `WEFT_LIMIT_ROOMS` / `WEFT_LIMIT_CONNS`; the rest is reserved for private notes. At most min(cores, 4) Argon2 hashes run at once (503 after a 10 s wait). Cookie-authenticated non-GET `/api` requests require an Origin header | Security review: owners can't be locked out by anonymous load, and no memory exhaustion via password hashing |
+| 2026-10-26 | web/src/sync (W2) | Additive. `OpenSessionOptions.kind?: 'doc' \| 'note'` (default `'doc'`): `'note'` connects to `/ws/n/:id` and namespaces local state as `note:<id>` (IndexedDB keys `note:<id>/<clientId>`, BroadcastChannel `weft:note:<id>`, `localStorage["weft:confirmed:note:<id>"]`); the WASM doc id stays the raw id. `SyncState.fatalStatus?: 401 \| 403 \| 404` (with status `'error'`): a note socket closed with code 4001 (session revoked) → 401; two refused upgrades in a row → the session asks `GET /api/notes/:id/export.md` why and stops retrying on 401/403/404 until `reconnect()`. `TransportHandlers.onClose(attempt, code?)` passes the close code. `index.ts` also exports `warmUp()` (preload WASM) and `clearLocalNotes()` (delete all `note:*` local state, used on sign-out). | Wall: private notes, offline cache, sign the user out on revoked sessions |

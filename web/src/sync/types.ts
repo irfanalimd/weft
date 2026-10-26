@@ -13,6 +13,11 @@ export interface SyncState {
   lastSyncedAt: number | null;
   /** Human-readable error when status === 'error'. */
   error?: string;
+  /**
+   * Set (with status 'error') when a private note's socket is refused: 401 = not signed in,
+   * 403 = not yours, 404 = the note doesn't exist (yet). The session stops retrying until `reconnect()`.
+   */
+  fatalStatus?: 401 | 403 | 404;
 }
 
 export interface User {
@@ -58,9 +63,14 @@ export interface DocSession {
   destroy(): void;
 }
 
+/** 'doc' = anonymous doc on /ws/:id (default). 'note' = private note on /ws/n/:id (needs the session cookie). */
+export type SessionKind = 'doc' | 'note';
+
 export interface OpenSessionOptions {
   /** WebSocket base, e.g. "ws://localhost:5173". Defaults to the current origin. */
   serverUrl?: string;
+  /** Defaults to 'doc'. Notes keep their local copy under IndexedDB/localStorage keys prefixed "note:". */
+  kind?: SessionKind;
 }
 
 export type OpenSession = (docId: string, opts?: OpenSessionOptions) => Promise<DocSession>;

@@ -136,3 +136,18 @@ export class DocStorage {
     this.closed = true;
   }
 }
+
+/** Delete every stored state whose key starts with `prefix` (e.g. "note:"). Best effort. */
+export async function clearStates(prefix: string): Promise<void> {
+  const db = await openDb();
+  if (!db) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).delete(IDBKeyRange.bound(prefix, `${prefix}\uffff`));
+      tx.oncomplete = tx.onerror = tx.onabort = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}

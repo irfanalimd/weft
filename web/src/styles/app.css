@@ -899,6 +899,10 @@ a {
   font-size: 12px;
 }
 
+.palette__footer-end {
+  margin-left: auto;
+}
+
 .palette__footer span {
   display: inline-flex;
   align-items: center;

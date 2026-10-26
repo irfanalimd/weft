@@ -9,6 +9,9 @@
 //! message token bucket, a `Hello` deadline, an `Origin` check, a per-doc size quota, a cap on
 //! loaded rooms, and presence bound to the connection's `Hello` client id.
 
+pub mod api;
+pub mod auth;
+pub mod db;
 pub mod store;
 
 use std::collections::HashMap;
@@ -26,14 +29,20 @@ use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, WebSocketUp
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get};
-use tokio::sync::mpsc;
+use axum::routing::{any, get, patch, post};
+use tokio::sync::{mpsc, oneshot};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use weft_core::Doc;
 use weft_sync::{Message, Room, error_code};
 
+pub use db::Db;
 pub use store::{DocLog, DocStore};
+
+/// Client id the server uses for its own edits (seeding a note's text at creation).
+pub const SERVER_CLIENT_ID: u64 = 0x5745_4654_5345_5256; // "WEFTSERV"
+/// A note room refreshes its metadata (title/preview/FTS) at most this often.
+const NOTE_META_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// Outbound frames buffered per connection before it's considered too slow and dropped.
 const OUTBOUND_QUEUE: usize = 1024;
@@ -129,14 +138,38 @@ pub struct Config {
     /// Unload a room after it has had no connections for this long.
     pub idle_unload: Duration,
     pub limits: Limits,
+    /// `WEFT_BOOTSTRAP_TOKEN`: enables `/api/auth/setup` while no users exist (min 32 chars).
+    pub bootstrap_token: Option<String>,
+    /// `WEFT_ANONYMOUS_DOCS` (default `true`): serve anonymous docs on `/ws/:id`.
+    pub anonymous_docs: bool,
 }
 
 impl Config {
     /// `WEFT_ADDR` (default `0.0.0.0:7878`), `WEFT_DATA_DIR` (`./data`),
-    /// `WEFT_STATIC_DIR` (`./web/dist`), plus the [`Limits`] env vars.
+    /// `WEFT_STATIC_DIR` (`./web/dist`), `WEFT_BOOTSTRAP_TOKEN`, `WEFT_ANONYMOUS_DOCS`, plus the
+    /// [`Limits`] env vars.
     pub fn from_env() -> Result<Self, String> {
         let addr = std::env::var("WEFT_ADDR").unwrap_or_else(|_| "0.0.0.0:7878".into());
+        let bootstrap_token = std::env::var("WEFT_BOOTSTRAP_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
+        if bootstrap_token.as_ref().is_some_and(|t| t.len() < 32) {
+            return Err("WEFT_BOOTSTRAP_TOKEN must be at least 32 characters".into());
+        }
+        let anonymous_docs = match std::env::var("WEFT_ANONYMOUS_DOCS")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            v => return Err(format!("bad WEFT_ANONYMOUS_DOCS {v:?}: use true or false")),
+        };
         Ok(Config {
+            bootstrap_token,
+            anonymous_docs,
             addr: addr
                 .parse()
                 .map_err(|e| format!("bad WEFT_ADDR {addr:?}: {e}"))?,
@@ -160,11 +193,62 @@ pub fn valid_doc_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
+/// `^[1-9A-HJ-NP-Za-km-z]{16}$` (base58)
+pub fn valid_note_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() && !matches!(b, b'0' | b'O' | b'I' | b'l'))
+}
+
+/// Which namespace a room belongs to. Anonymous docs and private notes live in separate stores
+/// and separate registry keys, so they can never collide.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RoomKey {
+    Doc(String),
+    Note(String),
+}
+
+impl RoomKey {
+    fn id(&self) -> &str {
+        match self {
+            RoomKey::Doc(id) | RoomKey::Note(id) => id,
+        }
+    }
+}
+
+impl std::fmt::Display for RoomKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RoomKey::Doc(id) => write!(f, "doc:{id}"),
+            RoomKey::Note(id) => write!(f, "note:{id}"),
+        }
+    }
+}
+
+/// Pending metadata refresh state of a note room.
+#[derive(Default)]
+struct NoteMeta {
+    /// Persisted edits not yet reflected in the DB metadata.
+    dirty: bool,
+    /// A debounced refresh task is pending.
+    scheduled: bool,
+}
+
+/// An open authenticated (note) socket, so revoking a session or disabling a user closes it.
+pub(crate) struct SocketReg {
+    pub user_id: i64,
+    pub session: [u8; 32],
+    pub note_id: String,
+    kill: oneshot::Sender<()>,
+}
+
 struct RoomInner {
     room: Room,
     log: DocLog,
     outbound: HashMap<u64, mpsc::Sender<Bytes>>,
     idle_since: Option<Instant>,
+    meta: NoteMeta,
 }
 
 struct RoomSlot {
@@ -178,39 +262,181 @@ impl RoomSlot {
 }
 
 pub struct AppState {
+    /// Anonymous docs (`docs/`).
     store: DocStore,
-    rooms: Mutex<HashMap<String, Arc<RoomSlot>>>,
+    /// Private notes (`notes/`).
+    notes: DocStore,
+    pub(crate) db: Db,
+    rooms: Mutex<HashMap<RoomKey, Arc<RoomSlot>>>,
     started: Instant,
     connections: AtomicUsize,
     next_conn: AtomicU64,
     idle_unload: Duration,
-    limits: Limits,
+    pub(crate) limits: Limits,
     /// Open WebSockets per client IP bucket (guarded together with `connections`).
     per_ip: Mutex<HashMap<IpAddr, usize>>,
+    pub(crate) throttle: auth::Throttle,
+    pub(crate) bootstrap_token: Option<String>,
+    pub(crate) anonymous_docs: bool,
+    /// Authenticated note sockets by connection id.
+    sockets: Mutex<HashMap<u64, SocketReg>>,
 }
 
 impl AppState {
-    pub fn new(store: DocStore, idle_unload: Duration) -> Arc<Self> {
-        Self::with_limits(store, idle_unload, Limits::default())
-    }
-
-    pub fn with_limits(store: DocStore, idle_unload: Duration, limits: Limits) -> Arc<Self> {
-        Arc::new(AppState {
-            store,
+    /// Opens `<data_dir>/{docs,notes}/` and `<data_dir>/weft.db` (running migrations).
+    pub fn open(config: &Config) -> io::Result<Arc<Self>> {
+        let db = Db::open(&config.data_dir.join("weft.db"))
+            .map_err(|e| io::Error::other(format!("opening weft.db: {e}")))?;
+        Ok(Arc::new(AppState {
+            store: DocStore::new(&config.data_dir)?,
+            notes: DocStore::in_subdir(&config.data_dir, "notes")?,
+            db,
             rooms: Mutex::new(HashMap::new()),
             started: Instant::now(),
             connections: AtomicUsize::new(0),
             next_conn: AtomicU64::new(1),
-            idle_unload,
-            limits,
+            idle_unload: config.idle_unload,
+            limits: config.limits.clone(),
             per_ip: Mutex::new(HashMap::new()),
-        })
+            throttle: auth::Throttle::default(),
+            bootstrap_token: config.bootstrap_token.clone(),
+            anonymous_docs: config.anonymous_docs,
+            sockets: Mutex::new(HashMap::new()),
+        }))
+    }
+
+    fn store_for(&self, key: &RoomKey) -> &DocStore {
+        match key {
+            RoomKey::Doc(_) => &self.store,
+            RoomKey::Note(_) => &self.notes,
+        }
+    }
+
+    fn sockets(&self) -> MutexGuard<'_, HashMap<u64, SocketReg>> {
+        self.sockets.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Closes every authenticated socket matching `pick`.
+    pub(crate) fn kill_sockets(&self, pick: impl Fn(&SocketReg) -> bool) {
+        let mut sockets = self.sockets();
+        let ids: Vec<u64> = sockets
+            .iter()
+            .filter(|(_, r)| pick(r))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if let Some(r) = sockets.remove(&id) {
+                let _ = r.kill.send(());
+            }
+        }
+    }
+
+    /// The current text of a doc or note (from the loaded room, else from disk). `None` if it
+    /// was never stored.
+    pub(crate) fn current_text(&self, key: &RoomKey) -> io::Result<Option<String>> {
+        if let Some(slot) = self.rooms().get(key).cloned() {
+            return Ok(Some(slot.lock().room.doc().text()));
+        }
+        let store = self.store_for(key);
+        if !store.exists(key.id()) {
+            return Ok(None);
+        }
+        let mut doc = Doc::new(1);
+        for rec in &store.read(key.id())? {
+            let _ = doc.apply_update(rec);
+        }
+        Ok(Some(doc.text()))
+    }
+
+    /// Writes a fresh note log holding `text` as a single server-side insert.
+    pub(crate) fn seed_note(&self, id: &str, text: &str) -> io::Result<()> {
+        // A log without a DB row can only be a leftover of a failed delete.
+        self.drop_note_content(id);
+        let (_, mut log) = self.notes.open(id)?;
+        if !text.is_empty() {
+            let mut doc = Doc::new(SERVER_CLIENT_ID);
+            log.append(&doc.insert(0, text))?;
+        }
+        log.sync()
+    }
+
+    /// Closes the note's sockets, unloads its room and deletes its log.
+    pub(crate) fn drop_note_content(&self, id: &str) {
+        self.kill_sockets(|r| r.note_id == id);
+        let key = RoomKey::Note(id.to_string());
+        if let Some(slot) = self.rooms().remove(&key) {
+            let mut inner = slot.lock();
+            inner.meta = NoteMeta::default();
+            inner.outbound.clear();
+        }
+        if let Err(e) = self.notes.remove(id)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            tracing::error!(note = id, error = %e, "deleting note log failed");
+        }
+    }
+
+    /// Recomputes title/preview/FTS for a note from its text.
+    pub(crate) fn refresh_note_meta(&self, id: &str, text: &str) {
+        let (title, preview) = db::title_and_preview(text);
+        if let Err(e) = self.db.refresh_note(id, &title, &preview, text) {
+            tracing::error!(note = id, error = %e, "refreshing note metadata failed");
+        }
+    }
+
+    /// Called after a note room persisted edits: refreshes its metadata within
+    /// [`NOTE_META_DEBOUNCE`], coalescing everything in between.
+    fn note_touched(self: &Arc<Self>, key: &RoomKey, slot: &Arc<RoomSlot>) {
+        let RoomKey::Note(id) = key else { return };
+        let mut inner = slot.lock();
+        inner.meta.dirty = true;
+        if inner.meta.scheduled {
+            return;
+        }
+        inner.meta.scheduled = true;
+        drop(inner);
+        let (state, slot, id) = (self.clone(), slot.clone(), id.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(NOTE_META_DEBOUNCE).await;
+            let text = {
+                let mut inner = slot.lock();
+                inner.meta.scheduled = false;
+                if !std::mem::take(&mut inner.meta.dirty) {
+                    return; // already refreshed on unload, or deleted
+                }
+                inner.room.doc().text()
+            };
+            state.refresh_note_meta(&id, &text);
+        });
+    }
+
+    fn refresh_unloaded(&self, unloaded: Vec<(String, String)>) {
+        for (id, text) in unloaded {
+            self.refresh_note_meta(&id, &text);
+        }
+    }
+
+    /// Hourly housekeeping: expired sessions and throttle windows.
+    fn purge(&self) {
+        match self.db.purge_expired_sessions() {
+            Ok(n) if n > 0 => tracing::info!(n, "purged expired sessions"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "purging sessions failed"),
+        }
+        self.throttle.sweep();
     }
 
     /// Reserves a connection slot for `ip`, or returns the `Error` frame to close with.
-    fn admit(self: &Arc<Self>, ip: IpAddr) -> Result<ConnPermit, Message> {
+    /// Anonymous connections may only use [`anon_share`] of the cap, so they can't lock owners
+    /// out of their notes.
+    fn admit(self: &Arc<Self>, ip: IpAddr, anonymous: bool) -> Result<ConnPermit, Message> {
         let mut per_ip = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
-        if self.connections.load(Ordering::Relaxed) >= self.limits.max_conns {
+        let cap = if anonymous {
+            anon_share(self.limits.max_conns)
+        } else {
+            self.limits.max_conns
+        };
+        if self.connections.load(Ordering::Relaxed) >= cap {
             return Err(Message::Error {
                 code: error_code::OVERLOADED,
                 message: "server is at its connection limit; try again later".into(),
@@ -231,12 +457,13 @@ impl AppState {
         })
     }
 
-    fn rooms(&self) -> MutexGuard<'_, HashMap<String, Arc<RoomSlot>>> {
+    fn rooms(&self) -> MutexGuard<'_, HashMap<RoomKey, Arc<RoomSlot>>> {
         self.rooms.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn load_room(&self, doc_id: &str) -> io::Result<RoomInner> {
-        let (records, mut log) = self.store.open(doc_id)?;
+    fn load_room(&self, key: &RoomKey) -> io::Result<RoomInner> {
+        let doc_id = key.id();
+        let (records, mut log) = self.store_for(key).open(doc_id)?;
         let mut doc = Doc::new(rand::random::<u64>() | 1);
         let mut bad = 0usize;
         for rec in &records {
@@ -250,12 +477,13 @@ impl AppState {
         if log.needs_compaction() {
             log.compact(&doc.encode_full())?;
         }
-        tracing::info!(doc_id, records = records.len(), "room loaded");
+        tracing::info!(room = %key, records = records.len(), "room loaded");
         Ok(RoomInner {
             room: Room::new(doc_id.to_string(), doc),
             log,
             outbound: HashMap::new(),
             idle_since: None,
+            meta: NoteMeta::default(),
         })
     }
 
@@ -263,27 +491,51 @@ impl AppState {
     /// to close with.
     fn join(
         &self,
-        doc_id: &str,
+        key: &RoomKey,
         conn: u64,
         tx: mpsc::Sender<Bytes>,
     ) -> Result<Arc<RoomSlot>, Message> {
+        let mut unloaded = Vec::new();
+        let res = self.join_inner(key, conn, tx, &mut unloaded);
+        self.refresh_unloaded(unloaded);
+        res
+    }
+
+    fn join_inner(
+        &self,
+        key: &RoomKey,
+        conn: u64,
+        tx: mpsc::Sender<Bytes>,
+        unloaded: &mut Vec<(String, String)>,
+    ) -> Result<Arc<RoomSlot>, Message> {
         let mut rooms = self.rooms();
-        let slot = match rooms.get(doc_id) {
+        let max = self.limits.max_rooms;
+        // Anonymous docs may fill only `anon_share` of the rooms; the rest is kept for notes.
+        let full = |rooms: &HashMap<RoomKey, Arc<RoomSlot>>| {
+            rooms.len() >= max
+                || matches!(key, RoomKey::Doc(_))
+                    && rooms
+                        .keys()
+                        .filter(|k| matches!(k, RoomKey::Doc(_)))
+                        .count()
+                        >= anon_share(max)
+        };
+        let slot = match rooms.get(key) {
             Some(slot) => slot.clone(),
             None => {
-                if rooms.len() >= self.limits.max_rooms {
+                if full(&rooms) {
                     // Make room by unloading every room nobody is connected to.
-                    unload_rooms(&mut rooms, |_| true);
+                    *unloaded = unload_rooms(&mut rooms, |_| true);
                 }
-                if rooms.len() >= self.limits.max_rooms {
-                    tracing::warn!(doc_id, rooms = rooms.len(), "room limit reached");
+                if full(&rooms) {
+                    tracing::warn!(room = %key, rooms = rooms.len(), "room limit reached");
                     return Err(Message::Error {
                         code: error_code::OVERLOADED,
                         message: "server has too many documents open; try again later".into(),
                     });
                 }
-                let inner = self.load_room(doc_id).map_err(|e| {
-                    tracing::error!(doc_id, error = %e, "failed to load room");
+                let inner = self.load_room(key).map_err(|e| {
+                    tracing::error!(room = %key, error = %e, "failed to load room");
                     Message::Error {
                         code: error_code::INTERNAL,
                         message: "failed to load document".into(),
@@ -292,7 +544,7 @@ impl AppState {
                 let slot = Arc::new(RoomSlot {
                     inner: Mutex::new(inner),
                 });
-                rooms.insert(doc_id.to_string(), slot.clone());
+                rooms.insert(key.clone(), slot.clone());
                 slot
             }
         };
@@ -306,33 +558,58 @@ impl AppState {
 
     /// Unloads rooms that have had no connections for `idle_unload`.
     fn reap_idle(&self) {
-        unload_rooms(&mut self.rooms(), |inner| {
+        let unloaded = unload_rooms(&mut self.rooms(), |inner| {
             inner
                 .idle_since
                 .is_some_and(|t| t.elapsed() >= self.idle_unload)
         });
+        self.refresh_unloaded(unloaded);
     }
 
     fn sync_all(&self) {
-        for slot in self.rooms().values() {
-            let _ = slot.lock().log.sync();
+        let mut dirty = Vec::new();
+        for (key, slot) in self.rooms().iter() {
+            let mut inner = slot.lock();
+            let _ = inner.log.sync();
+            if let RoomKey::Note(id) = key
+                && std::mem::take(&mut inner.meta.dirty)
+            {
+                dirty.push((id.clone(), inner.room.doc().text()));
+            }
         }
+        self.refresh_unloaded(dirty);
     }
 }
 
+/// The part of a cap that anonymous docs may use (three quarters, at least 1).
+fn anon_share(cap: usize) -> usize {
+    (cap - cap / 4).max(1)
+}
+
 /// Unloads (after an fsync) every room with no connections for which `pick` returns true.
-fn unload_rooms(rooms: &mut HashMap<String, Arc<RoomSlot>>, pick: impl Fn(&RoomInner) -> bool) {
-    rooms.retain(|doc_id, slot| {
-        let inner = slot.lock();
+/// Returns `(note_id, text)` of unloaded note rooms whose metadata is stale.
+fn unload_rooms(
+    rooms: &mut HashMap<RoomKey, Arc<RoomSlot>>,
+    pick: impl Fn(&RoomInner) -> bool,
+) -> Vec<(String, String)> {
+    let mut stale = Vec::new();
+    rooms.retain(|key, slot| {
+        let mut inner = slot.lock();
         let idle = inner.outbound.is_empty() && inner.room.connection_count() == 0 && pick(&inner);
         if idle {
             if let Err(e) = inner.log.sync() {
-                tracing::warn!(doc_id, error = %e, "fsync on unload failed");
+                tracing::warn!(room = %key, error = %e, "fsync on unload failed");
             }
-            tracing::info!(doc_id, "room unloaded (idle)");
+            if let RoomKey::Note(id) = key
+                && std::mem::take(&mut inner.meta.dirty)
+            {
+                stale.push((id.clone(), inner.room.doc().text()));
+            }
+            tracing::info!(room = %key, "room unloaded (idle)");
         }
         !idle
     });
+    stale
 }
 
 /// A reserved connection slot; released on drop.
@@ -465,14 +742,15 @@ fn deliver(inner: &mut RoomInner, mut to: Vec<(u64, Message)>) {
     }
 }
 
-/// Handles one binary frame. `Err` carries the `Error` frame to send before closing.
+/// Handles one binary frame; `Ok(true)` if it persisted edits. `Err` carries the `Error` frame
+/// to send before closing.
 fn handle_frame(
     slot: &RoomSlot,
     conn: u64,
     frame: &[u8],
     ctx: &mut ConnCtx,
     limits: &Limits,
-) -> Result<(), Message> {
+) -> Result<bool, Message> {
     let msg = Message::decode(frame).map_err(|e| e.to_message())?;
     if let Message::Awareness { client_id, .. } = &msg
         && ctx.hello_client != Some(*client_id)
@@ -483,12 +761,12 @@ fn handle_frame(
             client_id,
             "dropping awareness for a foreign client id"
         );
-        return Ok(());
+        return Ok(false);
     }
     let mut inner = slot.lock();
     if !inner.outbound.contains_key(&conn) {
         // We were dropped as a slow consumer; the connection is about to close.
-        return Ok(());
+        return Ok(false);
     }
     let doc_id = inner.room.doc_id().to_string();
     if let Message::Update { update } = &msg {
@@ -544,7 +822,7 @@ fn handle_frame(
         }
     }
     deliver(&mut inner, out.to);
-    Ok(())
+    Ok(!out.persist.is_empty())
 }
 
 fn leave(slot: &RoomSlot, conn: u64) {
@@ -559,11 +837,41 @@ fn leave(slot: &RoomSlot, conn: u64) {
 
 pub fn app(state: Arc<AppState>, static_dir: PathBuf) -> Router {
     let spa = ServeDir::new(&static_dir).fallback(ServeFile::new(static_dir.join("index.html")));
-    Router::new()
-        .route("/ws/{doc_id}", get(ws_route))
+    // Everything under /api plus /ws/n gets CSRF checks and the session lookup.
+    let api = Router::new()
+        .route("/ws/n/{note_id}", get(ws_note_route))
+        .route("/api/auth/status", get(api::status))
+        .route("/api/auth/setup", post(api::setup))
+        .route("/api/auth/login", post(api::login))
+        .route("/api/auth/logout", post(api::logout))
+        .route("/api/me/password", post(api::change_password))
+        .route("/api/notes", get(api::list_notes).post(api::create_note))
+        .route(
+            "/api/notes/{id}",
+            patch(api::patch_note).delete(api::delete_note),
+        )
+        .route("/api/notes/{id}/export.md", get(api::export_note))
+        .route(
+            "/api/admin/users",
+            get(api::admin_list).post(api::admin_create),
+        )
+        .route(
+            "/api/admin/users/{id}",
+            patch(api::admin_patch).delete(api::admin_delete),
+        )
         .route("/api/docs/{doc_id}/export.md", get(export_route))
         .route("/api/stats", get(stats_route))
-        .route("/api/{*rest}", any(|| async { StatusCode::NOT_FOUND }))
+        .route(
+            "/api/{*rest}",
+            any(|| async { api::ApiError::not_found("no such endpoint") }),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::api_middleware,
+        ));
+    Router::new()
+        .route("/ws/{doc_id}", get(ws_route))
+        .merge(api)
         .route("/healthz", get(|| async { "ok" }))
         .fallback_service(spa)
         .layer(TraceLayer::new_for_http())
@@ -572,14 +880,22 @@ pub fn app(state: Arc<AppState>, static_dir: PathBuf) -> Router {
 
 /// Binds `config.addr` and serves until Ctrl-C.
 pub async fn run(config: Config) -> io::Result<()> {
-    let store = DocStore::new(&config.data_dir)?;
-    let state = AppState::with_limits(store, config.idle_unload, config.limits.clone());
+    let state = AppState::open(&config)?;
+    if config.bootstrap_token.is_none() && state.db.user_count().unwrap_or(0) == 0 {
+        tracing::warn!("no users and no WEFT_BOOTSTRAP_TOKEN: first-admin setup is disabled");
+    }
+    auth::warm_up();
     let reaper = state.clone();
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut n = 0u64;
         loop {
             tick.tick().await;
             reaper.reap_idle();
+            if n.is_multiple_of(720) {
+                reaper.purge();
+            }
+            n += 1;
         }
     });
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
@@ -587,6 +903,7 @@ pub async fn run(config: Config) -> io::Result<()> {
         addr = %listener.local_addr()?,
         data_dir = %config.data_dir.display(),
         static_dir = %config.static_dir.display(),
+        anonymous_docs = config.anonymous_docs,
         "weft-server listening"
     );
     let service =
@@ -627,11 +944,59 @@ async fn ws_route(
     headers: HeaderMap,
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
+    if !state.anonymous_docs {
+        return (StatusCode::NOT_FOUND, "anonymous docs are disabled").into_response();
+    }
     if !valid_doc_id(&doc_id) {
         return (StatusCode::BAD_REQUEST, "invalid doc id").into_response();
     }
+    upgrade(state, RoomKey::Doc(doc_id), None, peer, headers, ws)
+}
+
+/// `/ws/n/:id`: a private note; requires a session of the note's owner (401/403/404 before
+/// the upgrade).
+async fn ws_note_route(
+    Path(note_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    user: Result<auth::CurrentUser, api::ApiError>,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
+    if !valid_note_id(&note_id) {
+        return api::ApiError::bad_request("invalid note id").into_response();
+    }
+    let session = match user {
+        Ok(auth::CurrentUser(s)) => s,
+        Err(e) => return e.into_response(),
+    };
+    match state.db.note_owner(&note_id) {
+        Ok(Some(owner)) if owner == session.user.id => {}
+        Ok(Some(_)) => {
+            tracing::warn!(
+                note_id,
+                user = session.user.id,
+                "WebSocket to someone else's note"
+            );
+            return api::ApiError::forbidden("not your note").into_response();
+        }
+        Ok(None) => return api::ApiError::not_found("no such note").into_response(),
+        Err(e) => return api::ApiError::db(e).into_response(),
+    }
+    let auth = (session.user.id, session.token_hash);
+    upgrade(state, RoomKey::Note(note_id), Some(auth), peer, headers, ws)
+}
+
+fn upgrade(
+    state: Arc<AppState>,
+    key: RoomKey,
+    auth: Option<(i64, [u8; 32])>,
+    peer: SocketAddr,
+    headers: HeaderMap,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
+) -> Response {
     if !origin_allowed(&headers, &state.limits.allowed_origins) {
-        tracing::warn!(doc_id, origin = ?headers.get(header::ORIGIN), "rejected WebSocket Origin");
+        tracing::warn!(room = %key, origin = ?headers.get(header::ORIGIN), "rejected WebSocket Origin");
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
     let ws = match ws {
@@ -639,10 +1004,10 @@ async fn ws_route(
         Err(rejection) => return rejection.into_response(),
     };
     let ip = client_ip(peer, &headers);
-    match state.admit(ip) {
-        Ok(permit) => ws.on_upgrade(move |socket| connection(state, doc_id, socket, permit)),
+    match state.admit(ip, auth.is_none()) {
+        Ok(permit) => ws.on_upgrade(move |socket| connection(state, key, auth, socket, permit)),
         Err(err) => {
-            tracing::warn!(doc_id, %ip, ?err, "connection refused by limits");
+            tracing::warn!(room = %key, %ip, ?err, "connection refused by limits");
             ws.on_upgrade(move |mut socket| async move { close_with(&mut socket, err).await })
         }
     }
@@ -676,21 +1041,71 @@ async fn close_with(socket: &mut WebSocket, msg: Message) {
 
 async fn connection(
     state: Arc<AppState>,
-    doc_id: String,
+    key: RoomKey,
+    auth: Option<(i64, [u8; 32])>,
     mut socket: WebSocket,
     permit: ConnPermit,
 ) {
     let conn = state.next_conn.fetch_add(1, Ordering::Relaxed);
+    // Fires when the session is revoked or the user disabled (authenticated sockets only).
+    let (kill_tx, mut kill_rx) = oneshot::channel::<()>();
+    let _anon_kill = match auth {
+        Some((user_id, session)) => {
+            state.sockets().insert(
+                conn,
+                SocketReg {
+                    user_id,
+                    session,
+                    note_id: key.id().to_string(),
+                    kill: kill_tx,
+                },
+            );
+            // Re-check now that the socket is registered: a logout, disable or delete that
+            // ran between the pre-upgrade check and here would otherwise miss this socket.
+            let session_ok =
+                matches!(state.db.session_user(&session), Ok(Some((u, _))) if u.id == user_id);
+            let owner_ok = matches!(state.db.note_owner(key.id()), Ok(Some(o)) if o == user_id);
+            if !(session_ok && owner_ok) {
+                state.sockets().remove(&conn);
+                let _ = socket
+                    .send(WsMessage::Close(Some(CloseFrame {
+                        code: 4001,
+                        reason: "session revoked".into(),
+                    })))
+                    .await;
+                return;
+            }
+            None
+        }
+        None => Some(kill_tx),
+    };
+    let reason = serve_connection(&state, &key, conn, &mut socket, &permit, &mut kill_rx).await;
+    if auth.is_some() {
+        state.sockets().remove(&conn);
+    }
+    drop(permit);
+    tracing::info!(room = %key, conn, reason, "disconnected");
+}
+
+async fn serve_connection(
+    state: &Arc<AppState>,
+    key: &RoomKey,
+    conn: u64,
+    socket: &mut WebSocket,
+    permit: &ConnPermit,
+    kill_rx: &mut oneshot::Receiver<()>,
+) -> &'static str {
+    let doc_id = key.id();
     let (tx, mut rx) = mpsc::channel::<Bytes>(OUTBOUND_QUEUE);
-    let slot = match state.join(&doc_id, conn, tx) {
+    let slot = match state.join(key, conn, tx) {
         Ok(slot) => slot,
         Err(msg) => {
-            close_with(&mut socket, msg).await;
-            return;
+            close_with(socket, msg).await;
+            return "join failed";
         }
     };
     let limits = &state.limits;
-    tracing::info!(doc_id, conn, ip = %permit.ip, "connected");
+    tracing::info!(room = %key, conn, ip = %permit.ip, "connected");
 
     let mut ctx = ConnCtx::default();
     let mut bucket = TokenBucket::new(limits.msg_rate, limits.msg_burst);
@@ -709,15 +1124,19 @@ async fn connection(
                         code: error_code::RATE_LIMITED,
                         message: "too many messages; slow down".into(),
                     };
-                    close_with(&mut socket, err).await;
+                    close_with(socket, err).await;
                     break "rate limited";
                 }
                 Some(Ok(WsMessage::Binary(frame))) => {
                     last_seen = Instant::now();
-                    if let Err(err) = handle_frame(&slot, conn, &frame, &mut ctx, limits) {
-                        tracing::warn!(doc_id, conn, ?err, "closing connection on bad frame");
-                        close_with(&mut socket, err).await;
-                        break "bad frame";
+                    match handle_frame(&slot, conn, &frame, &mut ctx, limits) {
+                        Ok(true) => state.note_touched(key, &slot),
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!(doc_id, conn, ?err, "closing connection on bad frame");
+                            close_with(socket, err).await;
+                            break "bad frame";
+                        }
                     }
                 }
                 Some(Ok(WsMessage::Text(_))) => {
@@ -725,7 +1144,7 @@ async fn connection(
                         code: error_code::MALFORMED,
                         message: "text frames are not supported".into(),
                     };
-                    close_with(&mut socket, err).await;
+                    close_with(socket, err).await;
                     break "text frame";
                 }
                 Some(Ok(WsMessage::Ping(_) | WsMessage::Pong(_))) => last_seen = Instant::now(),
@@ -745,8 +1164,17 @@ async fn connection(
                     code: error_code::MALFORMED,
                     message: "no Hello received in time".into(),
                 };
-                close_with(&mut socket, err).await;
+                close_with(socket, err).await;
                 break "no hello";
+            }
+            _ = &mut *kill_rx => {
+                let _ = socket
+                    .send(WsMessage::Close(Some(CloseFrame {
+                        code: 4001,
+                        reason: "session revoked".into(),
+                    })))
+                    .await;
+                break "session revoked";
             }
             _ = ping.tick() => {
                 if last_seen.elapsed() > PEER_TIMEOUT {
@@ -759,33 +1187,22 @@ async fn connection(
         }
     };
     leave(&slot, conn);
-    drop(permit);
-    tracing::info!(doc_id, conn, reason, "disconnected");
+    reason
 }
 
 async fn export_route(Path(doc_id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
+    if !state.anonymous_docs {
+        return (StatusCode::NOT_FOUND, "anonymous docs are disabled").into_response();
+    }
     if !valid_doc_id(&doc_id) {
         return (StatusCode::BAD_REQUEST, "invalid doc id").into_response();
     }
-    let loaded = state.rooms().get(&doc_id).cloned();
-    let text = match loaded {
-        Some(slot) => slot.lock().room.doc().text(),
-        None => {
-            if !state.store.exists(&doc_id) {
-                return (StatusCode::NOT_FOUND, "no such doc").into_response();
-            }
-            let records = match state.store.read(&doc_id) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!(doc_id, error = %e, "export read failed");
-                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-                }
-            };
-            let mut doc = Doc::new(1);
-            for rec in &records {
-                let _ = doc.apply_update(rec);
-            }
-            doc.text()
+    let text = match state.current_text(&RoomKey::Doc(doc_id.clone())) {
+        Ok(Some(t)) => t,
+        Ok(None) => return (StatusCode::NOT_FOUND, "no such doc").into_response(),
+        Err(e) => {
+            tracing::error!(doc_id, error = %e, "export read failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
     (

@@ -18,6 +18,9 @@ serde.workspace = true
 serde_json.workspace = true
 crc32fast.workspace = true
 rand.workspace = true
+rusqlite.workspace = true
+argon2.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 tokio-tungstenite.workspace = true

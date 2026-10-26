@@ -5,11 +5,14 @@
 //! ```
 //! Connects, completes the handshake, appends each argument (one edit per argument, typed
 //! while live), keeps listening for `WAIT_MS` (default 1000) and prints the final text.
+//! For a private note (`/ws/n/<id>`) set `COOKIE='weft_session=<token>'`; `ORIGIN` adds an
+//! `Origin` header.
 
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::{Message as WsMessage, client::IntoClientRequest, http};
 use weft_core::Doc;
 use weft_sync::{ClientSession, Message};
 
@@ -26,7 +29,25 @@ async fn main() {
     let client_id = rand::random::<u64>() | 1;
     let mut session = ClientSession::new(doc_id, Doc::new(client_id));
 
-    let (mut ws, _) = connect_async(url.as_str()).await.expect("connect");
+    let mut req = url.as_str().into_client_request().expect("bad url");
+    for (var, name) in [
+        ("COOKIE", http::header::COOKIE),
+        ("ORIGIN", http::header::ORIGIN),
+    ] {
+        if let Ok(v) = std::env::var(var) {
+            req.headers_mut()
+                .insert(name, v.parse().expect("header value"));
+        }
+    }
+    let mut ws = match connect_async(req).await {
+        Ok((ws, _)) => ws,
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            let body = resp.body().as_deref().map(String::from_utf8_lossy);
+            eprintln!("connect refused: HTTP {} {:?}", resp.status(), body);
+            std::process::exit(1);
+        }
+        Err(e) => panic!("connect: {e}"),
+    };
     for m in session.on_connected() {
         ws.send(WsMessage::binary(m.encode())).await.unwrap();
     }

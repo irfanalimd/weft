@@ -5,8 +5,8 @@ export interface TransportHandlers {
   /** Socket opened; the caller sends its handshake. */
   onOpen(): void;
   onFrame(frame: Uint8Array): void;
-  /** Socket closed (or failed to open). `attempt` = consecutive failures so far. */
-  onClose(attempt: number): void;
+  /** Socket closed (or failed to open). `attempt` = consecutive failures so far; `code` = the close code, if any. */
+  onClose(attempt: number, code?: number): void;
 }
 
 const BASE_MS = 400;
@@ -117,20 +117,20 @@ export class Transport {
     ws.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) this.h.onFrame(new Uint8Array(ev.data));
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (this.ws !== ws) return;
       this.detach(ws);
       this.ws = null;
-      this.failed();
+      this.failed(ev.code);
     };
     ws.onerror = () => {
       /* onclose follows */
     };
   }
 
-  private failed(): void {
+  private failed(code?: number): void {
     this.attempt++;
-    this.h.onClose(this.attempt);
+    this.h.onClose(this.attempt, code);
     if (this.stopped) return;
     const cap = Math.min(MAX_MS, BASE_MS * 2 ** Math.min(this.attempt - 1, 10));
     const delay = cap / 2 + Math.random() * (cap / 2); // "equal jitter": never hammer at 0 ms

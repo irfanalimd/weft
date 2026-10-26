@@ -1,7 +1,7 @@
 {
   "name": "Weft",
   "short_name": "Weft",
-  "description": "Real-time, offline-first collaborative Markdown. Open a link and start writing.",
+  "description": "Your notes, saved to your own server. Offline-first Markdown that syncs live across your devices.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
@@ -15,5 +15,8 @@
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
     { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ],
-  "shortcuts": [{ "name": "New doc", "url": "/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }]
+  "shortcuts": [
+    { "name": "New note", "short_name": "New note", "url": "/new", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Wall", "url": "/", "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }] }
+  ]
 }

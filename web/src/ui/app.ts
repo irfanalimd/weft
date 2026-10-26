@@ -1,9 +1,10 @@
-// The app shell: owns the chrome (top bar, palette, share, history, toasts) and swaps doc sessions in and out.
+// The editor view: owns the editor chrome (top bar, share, history) and swaps doc sessions in and out.
+// It serves both anonymous docs (/d/<slug>) and private notes (/n/<id>); the Shell mounts it.
 
 import type { ViewUpdate } from '@codemirror/view';
 import { createEditor, type EditorHandle } from '../editor/setup';
 import { scrollToAndFlash } from '../editor/focus';
-import { randomUser, type DocSession, type Peer, type SyncState } from '../sync/index';
+import { randomUser, type DocSession, type Peer, type SessionKind, type SyncState } from '../sync/index';
 import { buildCommands, colorItems } from './commands';
 import { h, isModKey, prefersReducedMotion, shortcut } from './dom';
 import { renderEmptyState } from './emptyState';
@@ -12,7 +13,8 @@ import { HistoryPanel } from './history';
 import { icon, logoSvg } from './icons';
 import { Palette } from './palette';
 import { Presence } from './presence';
-import { docPath, docUrl, newSlug, parseRoute } from './router';
+import type { Host } from './host';
+import { docPath, docUrl, noteUrl } from './router';
 import { SharePopover } from './share';
 import { touchRecent } from './storage';
 import { SyncPill } from './syncPill';
@@ -22,10 +24,13 @@ import { dismiss, toast } from './toast';
 
 const OFFLINE_TOAST = "You're offline · edits are saved on this device";
 
-export type SessionOpener = (docId: string) => Promise<DocSession>;
+export type SessionOpener = (docId: string, kind: SessionKind) => Promise<DocSession>;
 
 interface OpenDoc {
   id: string;
+  kind: SessionKind;
+  /** Text changed since the last time the Wall card was updated. */
+  dirty: boolean;
   session: DocSession;
   editor: EditorHandle;
   unsubs: (() => void)[];
@@ -38,7 +43,11 @@ interface OpenDoc {
 const finePointer = window.matchMedia('(pointer: fine)');
 
 export class App {
+  readonly el: HTMLElement;
   private root: HTMLElement;
+  private backBtn: HTMLButtonElement;
+  private brand: HTMLAnchorElement;
+  private saveBtn: HTMLButtonElement;
   private titleEl = h('h1', { class: 'doc-title is-untitled' }, 'Untitled');
   private presence: Presence;
   private pill: SyncPill;
@@ -47,7 +56,6 @@ export class App {
   private editorHost = h('div', { class: 'weft-editor editor-host' });
   private emptyEl = h('div', { class: 'empty-state', hidden: true });
   private footer = h('footer', { class: 'footer', 'aria-label': 'Document stats' });
-  private palette = new Palette();
   private share = new SharePopover();
   private history: HistoryPanel;
   private doc: OpenDoc | null = null;
@@ -61,8 +69,9 @@ export class App {
   private pointer = { x: 0, y: 0 };
 
   constructor(
-    mount: HTMLElement,
     private openSession: SessionOpener,
+    readonly host: Host,
+    private palette: Palette,
   ) {
     this.presence = new Presence({
       onJump: (p) => this.jumpTo(p),
@@ -98,13 +107,33 @@ export class App {
       },
       icon('command'),
     );
-    const brand = h('a', { class: 'brand', href: '/', 'aria-label': 'Weft: new document', 'data-tip': 'New doc' });
+    const brand = h('a', { class: 'brand', href: '/', 'aria-label': 'Weft home', 'data-tip': 'Home' });
     brand.innerHTML = logoSvg;
     brand.addEventListener('click', (e) => {
       if (e.metaKey || e.ctrlKey || e.shiftKey) return;
       e.preventDefault();
-      this.newDoc();
+      this.host.navigate('/');
     });
+    this.brand = brand;
+    this.backBtn = h(
+      'button',
+      { class: 'btn back-btn', type: 'button', 'aria-label': 'Back to your wall', onclick: () => this.host.goWall() },
+      icon('arrowLeft'),
+      h('span', null, 'Wall'),
+    );
+    this.saveBtn = h(
+      'button',
+      {
+        class: 'btn btn--outline save-btn',
+        type: 'button',
+        hidden: true,
+        'data-tip': 'Copy this doc into a private note',
+        onclick: () => this.saveToWall(),
+      },
+      icon('bookmark'),
+      h('span', { class: 'hide-narrow' }, 'Save to my wall'),
+      h('span', { class: 'show-narrow' }, 'Save'),
+    );
     this.titleEl.addEventListener('click', () =>
       window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' }),
     );
@@ -112,8 +141,8 @@ export class App {
     const topbar = h(
       'header',
       { class: 'topbar' },
-      h('div', { class: 'topbar__left' }, brand, this.titleEl),
-      h('div', { class: 'topbar__right' }, this.presence.el, this.pill.el, this.shareBtn, paletteBtn),
+      h('div', { class: 'topbar__left' }, this.backBtn, brand, this.titleEl),
+      h('div', { class: 'topbar__right' }, this.presence.el, this.pill.el, this.saveBtn, this.shareBtn, paletteBtn),
     );
     const surface = h('main', { class: 'surface', id: 'main' }, this.column);
     this.column.append(this.editorHost, this.emptyEl);
@@ -128,11 +157,10 @@ export class App {
       onRestored: (step) => toast(`Restored version from step ${step}`, { icon: 'restore' }),
     });
 
-    this.root = h('div', { class: 'app' }, topbar, surface, this.footer, this.history.bar, this.share.el, this.palette.el);
-    mount.replaceChildren(this.root);
+    this.root = h('div', { class: 'app' }, topbar, surface, this.footer, this.history.bar, this.share.el);
+    this.el = this.root;
 
     this.bindGlobalKeys();
-    window.addEventListener('popstate', () => this.route());
     window.addEventListener('scroll', () => this.root.classList.toggle('is-scrolled', window.scrollY > 4), {
       passive: true,
     });
@@ -141,35 +169,45 @@ export class App {
 
   // ---------- Routing / doc lifecycle ----------
 
-  route(): void {
-    const r = parseRoute(location.pathname);
-    if (r.kind === 'new') {
-      const id = newSlug();
-      history.replaceState(null, '', docPath(id));
-      void this.openDoc(id);
-    } else if (r.kind === 'doc') {
-      if (this.doc?.id !== r.id) void this.openDoc(r.id);
-    } else {
-      this.closeDoc();
-      this.showError(
-        "This link doesn't lead to a doc",
-        'Doc links look like /d/ followed by letters, numbers, - or _. Check the link, or start a fresh doc.',
-        `"${r.raw.slice(0, 80)}"`,
-        false,
-      );
-    }
+  /** Show a doc or note (no-op if it's already open). */
+  show(kind: SessionKind, id: string): void {
+    if (this.doc?.id === id && this.doc.kind === kind) return;
+    void this.openDoc(id, kind);
+  }
+
+  /** Show an error page instead of a doc (bad link, feature disabled…). */
+  showMessage(kind: SessionKind, title: string, body: string, detail = ''): void {
+    this.closeDoc();
+    this.setKind(kind);
+    this.showError(title, body, detail, false);
   }
 
   newDoc(): void {
-    const id = newSlug();
-    history.pushState(null, '', docPath(id));
-    void this.openDoc(id);
+    this.host.newTempDoc();
   }
 
   goTo(id: string): void {
     if (this.doc?.id === id) return;
-    history.pushState(null, '', docPath(id));
-    void this.openDoc(id);
+    this.host.navigate(docPath(id));
+  }
+
+  /** Leave the editor (the Shell is switching views). */
+  close(): void {
+    this.closeDoc();
+    this.root.classList.remove('is-typing', 'is-focus');
+    this.focusMode = false;
+  }
+
+  private kind: SessionKind = 'doc';
+
+  private setKind(kind: SessionKind): void {
+    this.kind = kind;
+    const note = kind === 'note';
+    this.root.classList.toggle('is-note', note);
+    this.backBtn.hidden = !note;
+    this.brand.hidden = note;
+    this.shareBtn.hidden = note;
+    this.saveBtn.hidden = note || !this.host.me;
   }
 
   private closeDoc(): void {
@@ -179,15 +217,17 @@ export class App {
     const d = this.doc;
     this.doc = null;
     if (!d) return;
-    this.flushMeta(d);
+    this.flushMeta(d, true);
     d.unsubs.forEach((u) => u());
     d.editor.destroy();
     d.session.destroy();
   }
 
-  async openDoc(id: string): Promise<void> {
+  async openDoc(id: string, kind: SessionKind = 'doc'): Promise<void> {
     this.closeDoc();
+    this.setKind(kind);
     const seq = ++this.openSeq;
+    const bridge = kind === 'note' ? this.host.takeKeyboardBridge() : null;
     this.offlineSince = null;
     this.maxUnsynced = 0;
     this.everLive = false;
@@ -201,8 +241,11 @@ export class App {
 
     let session: DocSession;
     try {
-      session = await this.openSession(id);
+      if (kind === 'note') await this.host.beforeOpenNote(id);
+      if (seq !== this.openSeq) return;
+      session = await this.openSession(id, kind);
     } catch (err) {
+      bridge?.remove();
       if (seq !== this.openSeq) return;
       console.error('[weft] could not open session', err);
       this.showError(
@@ -215,6 +258,7 @@ export class App {
     }
     if (seq !== this.openSeq) {
       session.destroy();
+      bridge?.remove();
       return;
     }
 
@@ -223,11 +267,13 @@ export class App {
       parent: this.editorHost,
       doc: session.getText(),
       sessionExtensions: session.editorExtensions(),
-      placeholder: 'Start writing…',
+      placeholder: kind === 'note' ? 'Write something…' : 'Start writing…',
       onUpdate: (u) => this.onEditorUpdate(u),
     });
     const doc: OpenDoc = {
       id,
+      kind,
+      dirty: false,
       session,
       editor,
       unsubs: [],
@@ -247,13 +293,27 @@ export class App {
     );
     editor.setFocusMode(this.focusMode);
     this.flushMeta(doc);
-    if (finePointer.matches) editor.view.focus();
+    if (bridge) {
+      // Anything typed while the note was opening goes in first; then the editor takes over the keyboard.
+      const typed = bridge.value;
+      const view = editor.view;
+      view.focus();
+      bridge.remove();
+      if (typed) {
+        const end = view.state.doc.length;
+        view.dispatch({ changes: { from: end, insert: typed }, selection: { anchor: end + typed.length }, userEvent: 'input.type' });
+      } else {
+        view.dispatch({ selection: { anchor: view.state.doc.length } });
+      }
+    } else if (finePointer.matches) editor.view.focus();
   }
 
   private showError(title: string, body: string, detail: string, canRetry: boolean): void {
     this.setTitle(null);
+    this.titleEl.textContent = '';
     this.emptyEl.hidden = true;
     const mockHref = `${location.pathname}?mock`;
+    const note = this.kind === 'note';
     this.editorHost.replaceChildren(
       h(
         'section',
@@ -271,15 +331,20 @@ export class App {
                   class: 'btn btn--primary',
                   type: 'button',
                   onclick: () => {
-                    const r = parseRoute(location.pathname);
-                    if (r.kind === 'doc') void this.openDoc(r.id);
+                    const m = /^\/(d|n)\/([^/]+)/.exec(location.pathname);
+                    if (m) void this.openDoc(decodeURIComponent(m[2]), m[1] === 'n' ? 'note' : 'doc');
                   },
                 },
                 'Try again',
               )
             : null,
-          h('button', { class: 'btn btn--outline', type: 'button', onclick: () => this.newDoc() }, icon('plus'), 'New doc'),
-          canRetry && !location.search.includes('mock')
+          note || this.host.me
+            ? h('button', { class: 'btn btn--outline', type: 'button', onclick: () => this.host.goWall() }, icon('arrowLeft'), 'Back to your wall')
+            : null,
+          !note && this.host.anonymousDocs
+            ? h('button', { class: 'btn btn--outline', type: 'button', onclick: () => this.newDoc() }, icon('plus'), 'New doc')
+            : null,
+          canRetry && !note && !location.search.includes('mock')
             ? h('a', { class: 'btn', href: mockHref }, 'Try the offline demo')
             : null,
         ),
@@ -293,6 +358,7 @@ export class App {
 
   private onEditorUpdate(u: ViewUpdate): void {
     if (!u.docChanged) return;
+    if (this.doc) this.doc.dirty = true;
     const local = u.transactions.some(
       (tr) => tr.isUserEvent('input') || tr.isUserEvent('delete') || tr.isUserEvent('move') || tr.isUserEvent('undo') || tr.isUserEvent('redo'),
     );
@@ -310,7 +376,7 @@ export class App {
   }
 
   /** Recompute everything derived from the text: title, stats, empty state, recents. */
-  private flushMeta(doc: OpenDoc): void {
+  private flushMeta(doc: OpenDoc, closing = false): void {
     const text = doc.editor.view.state.doc.toString();
     const title = deriveTitle(text);
     if (doc === this.doc) {
@@ -318,12 +384,20 @@ export class App {
       doc.words = countWords(text);
       this.renderFooter(doc);
       const empty = text.trim() === '';
-      if (empty && this.emptyEl.hidden) renderEmptyState(this.emptyEl, doc.id, (id) => this.goTo(id));
+      if (empty && this.emptyEl.hidden) {
+        renderEmptyState(this.emptyEl, doc.id, (id) => this.goTo(id), doc.kind === 'doc');
+      }
       this.emptyEl.hidden = !empty;
     }
     doc.title = title;
     const now = Date.now();
-    if (text.trim() && (now - this.lastRecentWrite > 2000 || doc !== this.doc)) {
+    if (doc.kind === 'note') {
+      if (doc.dirty && (closing || now - this.lastRecentWrite > 1000)) {
+        this.lastRecentWrite = now;
+        doc.dirty = false;
+        this.host.noteEdited(doc.id, text);
+      }
+    } else if (text.trim() && (now - this.lastRecentWrite > 2000 || doc !== this.doc)) {
       this.lastRecentWrite = now;
       touchRecent(doc.id, title ?? 'Untitled');
     }
@@ -333,7 +407,7 @@ export class App {
     this.titleEl.textContent = title ?? 'Untitled';
     this.titleEl.classList.toggle('is-untitled', !title);
     this.titleEl.title = title ?? '';
-    document.title = title ? `${title} · Weft` : 'Weft';
+    document.title = title ? `${title} · Weft` : this.kind === 'note' ? 'New note · Weft' : 'Weft';
   }
 
   private renderFooter(doc: OpenDoc): void {
@@ -356,6 +430,9 @@ export class App {
   }
 
   private onSync(doc: OpenDoc, s: SyncState): void {
+    if (s.fatalStatus && doc.kind === 'note') {
+      void this.onRefused(doc, s.fatalStatus);
+    }
     const prev = doc.sync;
     doc.sync = s;
     this.pill.update(s);
@@ -380,6 +457,35 @@ export class App {
     if (this.offlineSince !== null) this.maxUnsynced = Math.max(this.maxUnsynced, s.unsyncedEdits);
   }
 
+  private async onRefused(doc: OpenDoc, status: 401 | 403 | 404): Promise<void> {
+    const recovered = await this.host.noteRefused(doc.id, status);
+    if (doc !== this.doc) return;
+    if (recovered) {
+      doc.session.reconnect();
+      return;
+    }
+    if (status === 401) return; // the Shell shows the sign-in page
+    this.closeDoc();
+    this.showError(
+      "This note isn't available",
+      status === 403
+        ? 'It belongs to someone else. Notes are private to the person who wrote them.'
+        : 'It may have been deleted, or the link is wrong.',
+      '',
+      false,
+    );
+  }
+
+  private saveToWall(): void {
+    const d = this.doc;
+    if (!d || d.kind !== 'doc') return;
+    if (d.sync.status !== 'live' || d.sync.unsyncedEdits > 0) {
+      toast('Wait a moment for this doc to sync, then try again', { icon: 'cloud' });
+      return;
+    }
+    this.host.saveDocToWall(d.id);
+  }
+
   // ---------- Commands ----------
 
   openPalette(): void {
@@ -389,6 +495,18 @@ export class App {
     }
     this.share.close(false);
     this.palette.open(buildCommands(this));
+  }
+
+  get currentKind(): SessionKind {
+    return this.kind;
+  }
+
+  get canSaveToWall(): boolean {
+    return this.doc?.kind === 'doc' && !!this.host.me;
+  }
+
+  saveToWallCommand(): void {
+    this.saveToWall();
   }
 
   get currentId(): string | null {
@@ -414,7 +532,7 @@ export class App {
   async copyLink(): Promise<void> {
     if (!this.doc) return;
     try {
-      await copyText(docUrl(this.doc.id));
+      await copyText(this.doc.kind === 'note' ? noteUrl(this.doc.id) : docUrl(this.doc.id));
       toast('Link copied', { icon: 'check' });
     } catch {
       this.openShare();
@@ -422,7 +540,7 @@ export class App {
   }
 
   openShare(): void {
-    if (!this.doc) return;
+    if (!this.doc || this.doc.kind === 'note') return;
     this.palette.close();
     this.share.toggle(this.shareBtn, docUrl(this.doc.id));
   }
@@ -517,6 +635,7 @@ export class App {
     window.addEventListener(
       'keydown',
       (e) => {
+        if (!this.root.isConnected || document.body.classList.contains('has-modal')) return;
         if (e.defaultPrevented && e.key !== 'Escape') return;
         const key = e.key.toLowerCase();
         if (isModKey(e) && !e.altKey && key === 'k') {

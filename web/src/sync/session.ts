@@ -3,7 +3,7 @@
 
 import type { Extension } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { DocSession, OpenSessionOptions, Peer, SyncState, User } from './types';
+import type { DocSession, OpenSessionOptions, Peer, SessionKind, SyncState, User } from './types';
 import { initWasm, WeftClient, type ChangeJs, type ClientOutputJs } from './wasm';
 import { loadUser, newClientId, saveUser } from './identity';
 import { DocStorage } from './storage';
@@ -75,6 +75,10 @@ export class Session implements DocSession {
   private connected = false; // onConnected() called for the current socket
   private everLive = false;
   private fatal: string | null = null;
+  private fatalStatus: SyncState['fatalStatus'];
+  /** Consecutive sockets that closed before opening (a refused upgrade looks like this). */
+  private refused = 0;
+  private probing = false;
   private destroyed = false;
   private lastSyncedAt: number | null = null;
   /** Last state vector the server confirmed, persisted so unsynced edits from earlier sessions count after a reload. */
@@ -103,15 +107,20 @@ export class Session implements DocSession {
     if (!DOC_ID.test(docId)) throw new Error(`invalid doc id: ${docId}`);
     await initWasm();
     const id = newClientId();
-    const { value: wc, storage } = await DocStorage.open(docId, id.toString(), (states) => {
+    const kind: SessionKind = opts.kind ?? 'doc';
+    // Notes and anonymous docs never share local state: notes live under "note:<id>".
+    const storeKey = kind === 'note' ? `note:${docId}` : docId;
+    const { value: wc, storage } = await DocStorage.open(storeKey, id.toString(), (states) => {
       const wc = states.length ? WeftClient.fromStates(docId, id, states) : new WeftClient(docId, id);
       return { value: wc, encode: () => wc.encodeState() };
     });
-    return new Session(docId, wc, storage, opts.serverUrl ?? defaultServerUrl());
+    return new Session(docId, kind, storeKey, wc, storage, opts.serverUrl ?? defaultServerUrl());
   }
 
   private constructor(
     readonly docId: string,
+    private readonly kind: SessionKind,
+    private readonly storeKey: string,
     wc: WeftClient,
     storage: DocStorage,
     serverUrl: string,
@@ -121,7 +130,7 @@ export class Session implements DocSession {
     this.clientId = wc.clientId.toString();
     const u = loadUser();
     this.user = { name: safeName(u.name, 'Anonymous'), color: safeColor(u.color) };
-    this.confirmedSv = loadConfirmed(docId);
+    this.confirmedSv = loadConfirmed(storeKey);
     this.syncState = new Emitter<SyncState>({
       status: 'connecting',
       unsyncedEdits: this.unsyncedEdits(),
@@ -129,7 +138,7 @@ export class Session implements DocSession {
     });
     this.peerList = new Emitter<Peer[]>(this.computePeers());
 
-    this.tabs = new CrossTab(docId, this.clientId, {
+    this.tabs = new CrossTab(storeKey, this.clientId, {
       onFrame: (f) => this.handleFrame(f, 'tab'),
       diffFor: (sv) => {
         try {
@@ -141,10 +150,11 @@ export class Session implements DocSession {
     });
     this.tabs.hello(wc.stateVector());
 
-    this.transport = new Transport(`${serverUrl.replace(/\/$/, '')}/ws/${docId}`, {
+    const path = kind === 'note' ? `/ws/n/${docId}` : `/ws/${docId}`;
+    this.transport = new Transport(`${serverUrl.replace(/\/$/, '')}${path}`, {
       onOpen: () => this.handleOpen(),
       onFrame: (f) => this.handleFrame(f, 'server'),
-      onClose: (attempt) => this.handleClose(attempt),
+      onClose: (attempt, code) => this.handleClose(attempt, code),
     });
     this.transport.start();
 
@@ -207,6 +217,8 @@ export class Session implements DocSession {
   reconnect(): void {
     if (this.destroyed) return;
     this.fatal = null;
+    this.fatalStatus = undefined;
+    this.refused = 0;
     this.transport.reconnect();
     this.updateSync();
   }
@@ -231,15 +243,26 @@ export class Session implements DocSession {
   private handleOpen(): void {
     if (this.destroyed) return;
     this.connected = true;
+    this.refused = 0;
     this.sendAll(this.wc.onConnected());
     this.updateSync();
   }
 
-  private handleClose(attempt: number): void {
+  private handleClose(attempt: number, code?: number): void {
     if (this.destroyed) return;
+    if (code === 4001 && this.kind === 'note') {
+      // The server revoked our session (signed out elsewhere, password changed, account disabled).
+      this.fatalStatus = 401;
+      this.fatal = 'Signed out';
+      this.transport.stop();
+    }
     if (this.connected) {
       this.connected = false;
       this.wc.onDisconnected();
+    } else if (attempt > 0 && this.kind === 'note' && navigator.onLine !== false) {
+      // The browser hides the HTTP status of a refused upgrade, so after two refusals in a row ask
+      // the API why (signed out? not ours? deleted?) instead of retrying forever.
+      if (++this.refused >= 2) void this.probeAccess();
     }
     // The session forgets peers on disconnect; the server replays them after the next handshake.
     if (this.peers.size) {
@@ -264,6 +287,7 @@ export class Session implements DocSession {
     if (out.error) {
       this.fatal = out.error.message || `server error ${out.error.code}`;
       this.transport.stop();
+      if (this.kind === 'note') void this.probeAccess();
     }
     if (out.changes.length) this.applyRemote(out.changes, null);
     let peersChanged = false;
@@ -282,6 +306,30 @@ export class Session implements DocSession {
       this.everLive = true;
       this.sendAwareness();
     }
+    this.updateSync();
+  }
+
+  private async probeAccess(): Promise<void> {
+    if (this.probing || this.destroyed) return;
+    this.probing = true;
+    let status = 0;
+    try {
+      const res = await fetch(`/api/notes/${encodeURIComponent(this.docId)}/export.md`, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+      });
+      status = res.status;
+      void res.body?.cancel();
+    } catch {
+      // Network trouble: keep retrying normally.
+    } finally {
+      this.probing = false;
+    }
+    if (this.destroyed || (status !== 401 && status !== 403 && status !== 404)) return;
+    this.fatalStatus = status as 401 | 403 | 404;
+    this.fatal =
+      status === 401 ? 'Signed out' : status === 403 ? "This note isn't yours" : "This note doesn't exist";
+    this.transport.stop();
     this.updateSync();
   }
 
@@ -451,7 +499,7 @@ export class Session implements DocSession {
     this.confirmedSv = this.wc.stateVector();
     this.confirmedSavedAt = Date.now();
     try {
-      localStorage.setItem(CONFIRMED_KEY + this.docId, toBase64(this.confirmedSv));
+      localStorage.setItem(CONFIRMED_KEY + this.storeKey, toBase64(this.confirmedSv));
     } catch {
       // Storage full or blocked: the count just stays conservative after a reload.
     }
@@ -489,11 +537,13 @@ export class Session implements DocSession {
       unsyncedEdits: synced ? 0 : this.unsyncedEdits(),
       lastSyncedAt: this.lastSyncedAt,
       ...(this.fatal ? { error: this.fatal } : {}),
+      ...(this.fatal && this.fatalStatus ? { fatalStatus: this.fatalStatus } : {}),
     };
     this.syncState.set(next, (a, b) =>
       a.status === b.status &&
       a.unsyncedEdits === b.unsyncedEdits &&
       a.error === b.error &&
+      a.fatalStatus === b.fatalStatus &&
       // Only re-emit lastSyncedAt when we transition into synced, not on every keystroke.
       (a.lastSyncedAt === b.lastSyncedAt || (a.lastSyncedAt !== null && b.lastSyncedAt !== null)),
     );
@@ -536,9 +586,9 @@ function samePeers(a: Peer[], b: Peer[]): boolean {
 
 const CONFIRMED_KEY = 'weft:confirmed:';
 
-function loadConfirmed(docId: string): Uint8Array {
+function loadConfirmed(key: string): Uint8Array {
   try {
-    const b64 = localStorage.getItem(CONFIRMED_KEY + docId);
+    const b64 = localStorage.getItem(CONFIRMED_KEY + key);
     if (b64) return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   } catch {
     // Fall through: nothing confirmed.

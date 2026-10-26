@@ -58,7 +58,7 @@ export class Palette {
       h('span', null, h('span', { class: 'kbd' }, '↑'), h('span', { class: 'kbd' }, '↓'), 'navigate'),
       h('span', null, h('span', { class: 'kbd' }, '↵'), 'run'),
       h('span', null, h('span', { class: 'kbd' }, 'esc'), 'close'),
-      h('span', { style: 'margin-left:auto' }, h('span', { class: 'kbd' }, shortcut('K')), 'toggle'),
+      h('span', { class: 'palette__footer-end' }, h('span', { class: 'kbd' }, shortcut('K')), 'toggle'),
     );
     const panel = h(
       'div',
@@ -213,9 +213,7 @@ export class Palette {
         'data-index': index,
         'aria-selected': 'false',
       },
-      item.swatch
-        ? h('span', { class: 'palette__swatch', style: `--c: ${item.swatch}` })
-        : icon(item.icon ?? 'dot'),
+      item.swatch ? swatch(item.swatch) : icon(item.icon ?? 'dot'),
       label,
       item.hint ? h('span', { class: 'palette__hint' }, item.hint) : null,
     );
@@ -281,4 +279,11 @@ export class Palette {
         break;
     }
   }
+}
+
+/** Swatch dot; the color goes through CSSOM so a strict CSP (no inline style attributes) is fine. */
+function swatch(color: string): HTMLElement {
+  const el = h('span', { class: 'palette__swatch' });
+  el.style.setProperty('--c', color);
+  return el;
 }
